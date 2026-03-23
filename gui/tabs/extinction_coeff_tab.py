@@ -24,6 +24,7 @@ from core.optics import calculate_extinction_coefficients_integer_wavelengths
 from core.plotting import plot_extinction_coefficients
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
+from gui.widgets.info_button import InfoButton
 from gui.worker import Worker
 
 
@@ -121,16 +122,45 @@ class ExtinctionCoeffTab(QWidget):
         )
 
         row1 = QHBoxLayout()
-        self._compound_edit = self._text_field(row1, "Compound name", "", pref=True)
-        self._solvent_edit  = self._text_field(row1, "Solvent", "acetonitrile", pref=True)
+        self._compound_edit = self._text_field(
+            row1, "Compound name", "", pref=True,
+            info_title="Compound name",
+            info_text=(
+                "Stored in the output CSV — used for plot titles and file naming.\n"
+                "Does not affect any calculation."
+            ),
+        )
+        self._solvent_edit = self._text_field(
+            row1, "Solvent", "acetonitrile", pref=True,
+            info_title="Solvent",
+            info_text=(
+                "Solvent name stored in the output CSV for traceability.\n"
+                "Solvent identity can shift absorption peaks; recording it ensures\n"
+                "results remain interpretable when revisited later."
+            ),
+        )
         row1.addStretch()
         self._stage2.add_layout(row1)
 
         row2 = QHBoxLayout()
         self._path_length_spin = self._dspin(
-            row2, "Path length (cm)", 0.001, 100.0, 1.0, 0.1, pref=True)
+            row2, "Path length (cm)", 0.001, 100.0, 1.0, 0.1, pref=True,
+            info_title="Path length (cm)",
+            info_text=(
+                "Optical path length of the cuvette in centimetres (typically 1 cm).\n"
+                "Used in Beer–Lambert: A = ε · c · l\n"
+                "Ensure this matches the actual cuvette used during measurement."
+            ),
+        )
         self._temperature_spin = self._dspin(
-            row2, "Temperature (°C)", -196.0, 400.0, 25.0, 1.0, pref=True)
+            row2, "Temperature (°C)", -196.0, 400.0, 25.0, 1.0, pref=True,
+            info_title="Temperature (°C)",
+            info_text=(
+                "Measurement temperature — stored in the output CSV for\n"
+                "traceability. Does not affect the extinction coefficient calculation\n"
+                "but is important for temperature-sensitive samples."
+            ),
+        )
         row2.addStretch()
         self._stage2.add_layout(row2)
 
@@ -196,13 +226,19 @@ class ExtinctionCoeffTab(QWidget):
     # ── UI helpers ────────────────────────────────────────────────────────
 
     def _text_field(self, parent_layout: QHBoxLayout,
-                    label: str, default: str, pref: bool = False) -> QLineEdit:
+                    label: str, default: str, pref: bool = False,
+                    info_title: str = "", info_text: str = "") -> QLineEdit:
         col = QVBoxLayout()
         col.setSpacing(4)
+        lbl_row = QHBoxLayout()
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        lbl_row.addWidget(lbl)
+        if info_title:
+            lbl_row.addWidget(InfoButton(info_title, info_text))
+        lbl_row.addStretch()
+        col.addLayout(lbl_row)
         edit = QLineEdit(default)
         edit.setMinimumWidth(160)
         col.addWidget(edit)
@@ -211,13 +247,19 @@ class ExtinctionCoeffTab(QWidget):
 
     def _dspin(self, parent_layout: QHBoxLayout, label: str,
                lo: float, hi: float, val: float, step: float,
-               pref: bool = False) -> QDoubleSpinBox:
+               pref: bool = False,
+               info_title: str = "", info_text: str = "") -> QDoubleSpinBox:
         col = QVBoxLayout()
         col.setSpacing(4)
+        lbl_row = QHBoxLayout()
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        lbl_row.addWidget(lbl)
+        if info_title:
+            lbl_row.addWidget(InfoButton(info_title, info_text))
+        lbl_row.addStretch()
+        col.addLayout(lbl_row)
         spin = QDoubleSpinBox()
         spin.setRange(lo, hi)
         spin.setValue(val)

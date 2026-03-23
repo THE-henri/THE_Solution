@@ -37,6 +37,7 @@ from gui.tabs.spectra_core import (
     plot_sb_diagnostic, plot_pca_diagnostic, plot_convergence,
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
+from gui.widgets.info_button import InfoButton
 from gui.widgets.plot_widget import PlotWidget
 from gui.worker import Worker
 from gui.project_prefs import ProjectPrefs, SpectraPrefs
@@ -206,6 +207,14 @@ class SpectraTab(QWidget):
         _mode_lbl = QLabel("Extraction mode:")
         _mode_lbl.setObjectName("pref_label")
         mode_row.addWidget(_mode_lbl)
+        mode_row.addWidget(InfoButton(
+            "Extraction mode",
+            "Algorithm used to separate the pure-component spectra:\n\n"
+            "'negative' — iterative S_B estimation from alpha-scaled spectral differences. Use when A→B conversion is the only process.\n\n"
+            "'negative_pca' — same as negative but uses PCA scores to determine the mixing fraction α. More robust for noisy data.\n\n"
+            "'positive_pca' — PCA-based extraction for A→B photoswitches measured from the B side.\n\n"
+            "'positive_pss' — uses a known PSS composition to anchor the extraction.",
+        ))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems([
             "negative",
@@ -236,6 +245,11 @@ class SpectraTab(QWidget):
         _cn_lbl = QLabel("Compound name:")
         _cn_lbl.setObjectName("pref_label")
         c1.addWidget(_cn_lbl)
+        c1.addWidget(InfoButton(
+            "Compound name",
+            "Identifier used in plot titles and output filenames.\n"
+            "Does not affect the calculation.",
+        ))
         self._compound_edit = QLineEdit()
         self._compound_edit.setPlaceholderText("e.g. DAE_001")
         self._compound_edit.setFixedWidth(180)
@@ -247,6 +261,12 @@ class SpectraTab(QWidget):
         _pl_lbl = QLabel("Path length (cm):")
         _pl_lbl.setObjectName("pref_label")
         c2.addWidget(_pl_lbl)
+        c2.addWidget(InfoButton(
+            "Path length (cm)",
+            "Optical path length of the cuvette in centimetres (typically 1 cm).\n"
+            "Used when converting absorbance to molar units if a concentration\n"
+            "is provided. Does not affect spectral shape extraction.",
+        ))
         self._path_length_spin = QDoubleSpinBox()
         self._path_length_spin.setRange(0.001, 100.0)
         self._path_length_spin.setDecimals(3)
@@ -255,6 +275,13 @@ class SpectraTab(QWidget):
         c2.addWidget(self._path_length_spin)
         c2.addSpacing(20)
         c2.addWidget(QLabel("Concentration (mol/L, blank = absorbance output):"))
+        c2.addWidget(InfoButton(
+            "Concentration (mol/L)",
+            "Solution concentration in mol/L.\n"
+            "When provided, extracted spectra are output in units of\n"
+            "M\u207b\u00b9cm\u207b\u00b9 (molar absorptivity).\n"
+            "Leave blank to output in raw absorbance units.",
+        ))
         self._conc_edit = QLineEdit()
         self._conc_edit.setPlaceholderText("leave blank for absorbance")
         self._conc_edit.setFixedWidth(200)
@@ -270,6 +297,13 @@ class SpectraTab(QWidget):
 
         bl_row = QHBoxLayout()
         bl_row.addWidget(QLabel("Offset to add to all spectra:"))
+        bl_row.addWidget(InfoButton(
+            "Spectral offset",
+            "Constant added to every spectrum before extraction.\n"
+            "Use to correct a residual baseline offset (e.g. dust or cuvette\n"
+            "scattering). Estimate from the flat spectral region outside any\n"
+            "absorption bands. Typical range: \u22120.05 to +0.05.",
+        ))
         self._baseline_offset_spin = QDoubleSpinBox()
         self._baseline_offset_spin.setRange(-1.0, 1.0)
         self._baseline_offset_spin.setDecimals(6)
@@ -281,6 +315,14 @@ class SpectraTab(QWidget):
         _sbt_lbl = QLabel("S_B tolerance (multiples of baseline σ):")
         _sbt_lbl.setObjectName("pref_label")
         bl_row.addWidget(_sbt_lbl)
+        bl_row.addWidget(InfoButton(
+            "S_B tolerance",
+            "Outlier rejection threshold for individual S_B estimates,\n"
+            "expressed as multiples of the baseline noise \u03c3.\n\n"
+            "Estimates whose values deviate by more than this factor from the\n"
+            "median are excluded. Set to 0 to disable outlier rejection.\n"
+            "Typical value: 3\u20135.",
+        ))
         self._sb_tol_spin = QDoubleSpinBox()
         self._sb_tol_spin.setRange(0.0, 100.0)
         self._sb_tol_spin.setDecimals(1)
@@ -305,6 +347,15 @@ class SpectraTab(QWidget):
         idx_lay.addWidget(idx_hint)
         idx_row = QHBoxLayout()
         idx_row.addWidget(QLabel("Indices:"))
+        idx_row.addWidget(InfoButton(
+            "Spectrum indices",
+            "Filter which spectra from the irradiation series are used.\n"
+            "Examples:\n"
+            "  '0:20'  \u2014 first 20 spectra\n"
+            "  '5,10,15' \u2014 specific indices\n"
+            "  blank \u2014 use all spectra\n\n"
+            "Useful to exclude early transients or late plateau spectra.",
+        ))
         self._indices_edit = QLineEdit()
         self._indices_edit.setPlaceholderText("blank = use all")
         self._indices_edit.setFixedWidth(200)
@@ -320,9 +371,17 @@ class SpectraTab(QWidget):
         neg_lay = QVBoxLayout(self._neg_grp)
 
         ref_row = QHBoxLayout()
-        _ref_lbl = QLabel("Reference λ (nm):")
+        _ref_lbl = QLabel("Reference \u03bb (nm):")
         _ref_lbl.setObjectName("pref_label")
         ref_row.addWidget(_ref_lbl)
+        ref_row.addWidget(InfoButton(
+            "Reference wavelength (nm)",
+            "Anchor wavelength for the negative subtraction mode.\n"
+            "Should be an isosbestic point or a wavelength where only\n"
+            "species A absorbs (species B is transparent).\n\n"
+            "A good reference minimises the residual at that wavelength\n"
+            "across all spectra in the series.",
+        ))
         self._ref_edit = QLineEdit()
         self._ref_edit.setPlaceholderText("e.g. 500  or  490:520  or  490,510,520")
         self._ref_edit.setFixedWidth(220)
@@ -337,15 +396,33 @@ class SpectraTab(QWidget):
         ref_hint.setStyleSheet("color:#888; font-size:8pt;")
         neg_lay.addWidget(ref_hint)
 
+        ref_weighted_row = QHBoxLayout()
         self._ref_weighted_cb = QCheckBox("Weighted reference (least-squares α estimation)")
         self._ref_weighted_cb.setObjectName("pref_cb")
         self._ref_weighted_cb.setChecked(True)
-        neg_lay.addWidget(self._ref_weighted_cb)
+        ref_weighted_row.addWidget(self._ref_weighted_cb)
+        ref_weighted_row.addWidget(InfoButton(
+            "Weighted reference (\u03b1 estimation)",
+            "When checked, the mixing fraction \u03b1 is estimated by\n"
+            "least-squares minimisation across all wavelengths (weighted).\n\n"
+            "When unchecked, \u03b1 is estimated from the ratio at the single\n"
+            "reference wavelength only. The weighted mode is more robust\n"
+            "when the reference wavelength is in a noisy region.",
+        ))
+        ref_weighted_row.addStretch()
+        neg_lay.addLayout(ref_weighted_row)
 
         alpha_row = QHBoxLayout()
-        _amin_lbl = QLabel("α window  min:")
+        _amin_lbl = QLabel("\u03b1 window  min:")
         _amin_lbl.setObjectName("pref_label")
         alpha_row.addWidget(_amin_lbl)
+        alpha_row.addWidget(InfoButton(
+            "\u03b1 minimum",
+            "Lower bound on the mixing fraction \u03b1.\n"
+            "\u03b1 represents how much of species B spectrum is present in a\n"
+            "given scan. Physical range: 0 (pure A) to 1 (pure B).\n\n"
+            "Set a lower bound > 0 only if you are certain B is always present.",
+        ))
         self._min_alpha_spin = QDoubleSpinBox()
         self._min_alpha_spin.setRange(0.0, 1.0)
         self._min_alpha_spin.setDecimals(2)
@@ -357,6 +434,13 @@ class SpectraTab(QWidget):
         _amax_lbl = QLabel("max:")
         _amax_lbl.setObjectName("pref_label")
         alpha_row.addWidget(_amax_lbl)
+        alpha_row.addWidget(InfoButton(
+            "\u03b1 maximum",
+            "Upper bound on the mixing fraction \u03b1.\n"
+            "Set to 1.0 for unrestricted conversion. Lower values constrain\n"
+            "the extraction to partial conversion data and can improve\n"
+            "stability when PSS has not been reached.",
+        ))
         self._max_alpha_spin = QDoubleSpinBox()
         self._max_alpha_spin.setRange(0.0, 1.0)
         self._max_alpha_spin.setDecimals(2)
@@ -367,10 +451,21 @@ class SpectraTab(QWidget):
         alpha_row.addStretch()
         neg_lay.addLayout(alpha_row)
 
+        excl_neg_row = QHBoxLayout()
         self._excl_neg_cb = QCheckBox("Exclude spectra with negative S_B values")
         self._excl_neg_cb.setObjectName("pref_cb")
         self._excl_neg_cb.setChecked(True)
-        neg_lay.addWidget(self._excl_neg_cb)
+        excl_neg_row.addWidget(self._excl_neg_cb)
+        excl_neg_row.addWidget(InfoButton(
+            "Exclude negative S_B spectra",
+            "When checked, spectra that produce negative values in the\n"
+            "extracted S_B spectrum are discarded.\n\n"
+            "Negative values are unphysical for absorbance spectra. Excluding\n"
+            "these frames usually improves the quality of the extraction but\n"
+            "may reduce the number of points in the bootstrap.",
+        ))
+        excl_neg_row.addStretch()
+        neg_lay.addLayout(excl_neg_row)
 
         self._stage2.add_widget(self._neg_grp)
 
@@ -381,6 +476,14 @@ class SpectraTab(QWidget):
         _bt_lbl = QLabel("Bootstrap iterations:")
         _bt_lbl.setObjectName("pref_label")
         pca_row.addWidget(_bt_lbl)
+        pca_row.addWidget(InfoButton(
+            "Bootstrap iterations",
+            "Number of resampled fits used to estimate uncertainty on S_B.\n"
+            "Higher values give more precise confidence bands but increase\n"
+            "computation time.\n\n"
+            "Recommended: \u2265 500 for publication-quality uncertainty.\n"
+            "100\u2013200 is sufficient for exploratory analysis.",
+        ))
         self._n_bootstrap_spin = QSpinBox()
         self._n_bootstrap_spin.setRange(100, 10000)
         self._n_bootstrap_spin.setSingleStep(500)
@@ -398,6 +501,14 @@ class SpectraTab(QWidget):
         _fb_lbl = QLabel("f_B at PSS:")
         _fb_lbl.setObjectName("pref_label")
         pss_row.addWidget(_fb_lbl)
+        pss_row.addWidget(InfoButton(
+            "f_B at PSS",
+            "Fraction of species B at the photostationary state (PSS).\n"
+            "Determines how the final spectrum of the mixture is decomposed\n"
+            "into pure A and pure B contributions.\n\n"
+            "Measure experimentally from NMR, HPLC, or another analytical\n"
+            "method. Typical values: 0.5\u20130.95 for efficient photoswitches.",
+        ))
         self._pss_fb_spin = QDoubleSpinBox()
         self._pss_fb_spin.setRange(0.01, 0.99)
         self._pss_fb_spin.setDecimals(3)
@@ -405,9 +516,16 @@ class SpectraTab(QWidget):
         self._pss_fb_spin.setFixedWidth(80)
         pss_row.addWidget(self._pss_fb_spin)
         pss_row.addSpacing(20)
-        _fbe_lbl = QLabel("± error:")
+        _fbe_lbl = QLabel("\u00b1 error:")
         _fbe_lbl.setObjectName("pref_label")
         pss_row.addWidget(_fbe_lbl)
+        pss_row.addWidget(InfoButton(
+            "f_B error",
+            "Uncertainty (\u00b1) on the PSS composition f_B.\n"
+            "Used in the bootstrap to propagate f_B uncertainty into\n"
+            "the extracted spectrum confidence band.\n\n"
+            "Typically 0.02\u20130.05 (absolute, e.g. from NMR integration error).",
+        ))
         self._pss_fb_err_spin = QDoubleSpinBox()
         self._pss_fb_err_spin.setRange(0.001, 0.5)
         self._pss_fb_err_spin.setDecimals(3)
@@ -449,9 +567,21 @@ class SpectraTab(QWidget):
         run_row.addStretch()
         self._stage3.add_layout(run_row)
 
+        diag_row = QHBoxLayout()
         self._diag_chk = QCheckBox("Show diagnostics  "
                                    "(individual estimates / PCA scores / convergence)")
-        self._stage3.add_widget(self._diag_chk)
+        diag_row.addWidget(self._diag_chk)
+        diag_row.addWidget(InfoButton(
+            "Show diagnostics",
+            "When checked, additional diagnostic plots are shown after extraction:\n\n"
+            "\u2022 negative mode: individual S_B estimates across the series\n"
+            "\u2022 PCA mode: PC1 scores vs. irradiation time\n"
+            "\u2022 Both modes: convergence test \u2014 S_B extracted from growing\n"
+            "  fractions of the data (25 %\u2192100 %). Stable overlapping curves\n"
+            "  indicate a reliable extraction.",
+        ))
+        diag_row.addStretch()
+        self._stage3.add_layout(diag_row)
 
         self._result_plot = PlotWidget(
             info_title="Extraction Result",

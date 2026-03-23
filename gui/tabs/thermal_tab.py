@@ -135,9 +135,17 @@ class _ThermalPanel(QWidget):
         param_row = QHBoxLayout()
         cmp_col = QVBoxLayout()
         cmp_col.setSpacing(4)
+        _cmp_lbl_row = QHBoxLayout()
         _cmp_lbl = QLabel("Compound name")
         _cmp_lbl.setObjectName("pref_label")
-        cmp_col.addWidget(_cmp_lbl)
+        _cmp_lbl_row.addWidget(_cmp_lbl)
+        _cmp_lbl_row.addWidget(InfoButton(
+            "Compound name",
+            "Name of the compound — used in plot titles and output file names.\n"
+            "Does not affect the calculation.",
+        ))
+        _cmp_lbl_row.addStretch()
+        cmp_col.addLayout(_cmp_lbl_row)
         self._compound_edit = QLineEdit("")
         self._compound_edit.setMinimumWidth(200)
         self._compound_edit.setPlaceholderText("e.g. AZA-SO2Me")
@@ -147,10 +155,20 @@ class _ThermalPanel(QWidget):
         wt_col = QVBoxLayout()
         wt_col.setSpacing(4)
         wt_col.addWidget(QLabel(""))   # vertical alignment spacer
+        _wt_row = QHBoxLayout()
         self._weighted_chk = QCheckBox("Weighted fit  (uses k SEM when n > 1)")
         self._weighted_chk.setObjectName("pref_cb")
         self._weighted_chk.setChecked(True)
-        wt_col.addWidget(self._weighted_chk)
+        _wt_row.addWidget(self._weighted_chk)
+        _wt_row.addWidget(InfoButton(
+            "Weighted fit",
+            "When enabled and multiple k values exist at a temperature, each\n"
+            "data point is weighted by 1/SEM² before fitting.\n\n"
+            "Recommended when temperature replicates have different uncertainties.\n"
+            "Turn off to treat all points equally (ordinary least squares).",
+        ))
+        _wt_row.addStretch()
+        wt_col.addLayout(_wt_row)
         param_row.addLayout(wt_col)
         param_row.addStretch()
         self._stage2.add_layout(param_row)

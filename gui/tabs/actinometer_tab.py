@@ -30,6 +30,7 @@ from gui.tabs.actinometer_core import (
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
+from gui.widgets.info_button import InfoButton
 from gui.worker import Worker
 
 
@@ -124,7 +125,18 @@ class _ChemActinometerPanel(QWidget):
         act_col.setSpacing(4)
         _act_lbl = QLabel("Actinometer")
         _act_lbl.setObjectName("pref_label")
-        act_col.addWidget(_act_lbl)
+        _act_hdr = QHBoxLayout()
+        _act_hdr.setSpacing(4)
+        _act_hdr.addWidget(_act_lbl)
+        _act_hdr.addWidget(InfoButton(
+            "Actinometer",
+            "Select the chemical actinometer that matches your irradiation\n"
+            "wavelength and experimental conditions.\n\n"
+            "Each entry shows the applicable wavelength range.\n"
+            "The most common choice for visible light is Reinecke's salt\n"
+            "or potassium ferrioxalate depending on wavelength."))
+        _act_hdr.addStretch()
+        act_col.addLayout(_act_hdr)
         self._act_combo = QComboBox()
         for key, val in ACTINOMETERS.items():
             rng = val["wavelength_range_nm"]
@@ -133,16 +145,28 @@ class _ChemActinometerPanel(QWidget):
         self._act_combo.setMinimumWidth(260)
         act_col.addWidget(self._act_combo)
         row1.addLayout(act_col)
-        self._lambda_spin  = self._dspin(row1, "λ_irr (nm)", 300.0, 900.0, 579.0, 1.0, 1, pref=True)
-        self._irr_time_spin = self._dspin(row1, "Irradiation time (s)", 0.1, 10000.0, 60.0, 1.0, pref=True)
+        self._lambda_spin  = self._dspin(row1, "λ_irr (nm)", 300.0, 900.0, 579.0, 1.0, 1, pref=True,
+            info_title="λ_irr (nm)",
+            info_text="Irradiation wavelength in nanometres.\nMust match the wavelength used during the actinometry experiment.\nUsed to look up the actinometer quantum yield and molar absorptivity.")
+        self._irr_time_spin = self._dspin(row1, "Irradiation time (s)", 0.1, 10000.0, 60.0, 1.0, pref=True,
+            info_title="Irradiation time (s)",
+            info_text="Duration of a single irradiation period in seconds.\nThis is the time the actinometer solution was exposed to light\nbetween consecutive UV-Vis measurements.")
         row1.addStretch()
         self._stage2.add_layout(row1)
 
         row2 = QHBoxLayout()
-        self._volume_spin   = self._dspin(row2, "Volume (mL)", 0.01, 100.0, 2.0, 0.1, pref=True)
-        self._path_spin     = self._dspin(row2, "Path length (cm)", 0.001, 100.0, 1.0, 0.1, pref=True)
-        self._spg_spin      = self._ispin(row2, "Scans / group", 1, 50, 3, pref=True)
-        self._tol_spin      = self._dspin(row2, "λ tolerance (nm)", 0.1, 10.0, 1.0, 0.5, pref=True)
+        self._volume_spin   = self._dspin(row2, "Volume (mL)", 0.01, 100.0, 2.0, 0.1, pref=True,
+            info_title="Volume (mL)",
+            info_text="Volume of actinometer solution in the cuvette (mL).\nUsed together with path length to convert absorbance changes\ninto molar concentration changes and ultimately photon flux.")
+        self._path_spin     = self._dspin(row2, "Path length (cm)", 0.001, 100.0, 1.0, 0.1, pref=True,
+            info_title="Path length (cm)",
+            info_text="Optical path length of the cuvette in centimetres (typically 1 cm).\nEnter the actual cuvette path length used — errors here propagate\ndirectly into the reported photon flux.")
+        self._spg_spin      = self._ispin(row2, "Scans / group", 1, 50, 3, pref=True,
+            info_title="Scans / group",
+            info_text="Number of consecutive UV-Vis scans averaged into one time point.\nHigher values reduce noise but lower temporal resolution.\nMatch to how the raw data was collected on the spectrometer.")
+        self._tol_spin      = self._dspin(row2, "λ tolerance (nm)", 0.1, 10.0, 1.0, 0.5, pref=True,
+            info_title="λ tolerance (nm)",
+            info_text="Window around the actinometer probe wavelength (nm) used to locate\nand average the absorption peak in each scan.\nIncrease if the peak is slightly shifted or the spectrum is noisy.")
         row2.addStretch()
         self._stage2.add_layout(row2)
 
@@ -246,13 +270,22 @@ class _ChemActinometerPanel(QWidget):
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
-    def _dspin(self, parent, label, lo, hi, val, step, decimals=3, pref=False):
+    def _dspin(self, parent, label, lo, hi, val, step, decimals=3, pref=False,
+               info_title="", info_text=""):
         col = QVBoxLayout()
         col.setSpacing(4)
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        if info_text:
+            hdr = QHBoxLayout()
+            hdr.setSpacing(4)
+            hdr.addWidget(lbl)
+            hdr.addWidget(InfoButton(info_title, info_text))
+            hdr.addStretch()
+            col.addLayout(hdr)
+        else:
+            col.addWidget(lbl)
         spin = QDoubleSpinBox()
         spin.setRange(lo, hi)
         spin.setValue(val)
@@ -263,13 +296,22 @@ class _ChemActinometerPanel(QWidget):
         parent.addLayout(col)
         return spin
 
-    def _ispin(self, parent, label, lo, hi, val, pref=False):
+    def _ispin(self, parent, label, lo, hi, val, pref=False,
+               info_title="", info_text=""):
         col = QVBoxLayout()
         col.setSpacing(4)
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        if info_text:
+            hdr = QHBoxLayout()
+            hdr.setSpacing(4)
+            hdr.addWidget(lbl)
+            hdr.addWidget(InfoButton(info_title, info_text))
+            hdr.addStretch()
+            col.addLayout(hdr)
+        else:
+            col.addWidget(lbl)
         spin = QSpinBox()
         spin.setRange(lo, hi)
         spin.setValue(val)
@@ -577,7 +619,19 @@ class _LEDCharacterisationPanel(QWidget):
         pw_col.setSpacing(4)
         _pw_lbl = QLabel("Power to use")
         _pw_lbl.setObjectName("pref_label")
-        pw_col.addWidget(_pw_lbl)
+        _pw_hdr = QHBoxLayout()
+        _pw_hdr.setSpacing(4)
+        _pw_hdr.addWidget(_pw_lbl)
+        _pw_hdr.addWidget(InfoButton(
+            "Power to use",
+            "Which power measurement(s) to use when scaling the emission spectrum\n"
+            "to absolute photon flux.\n\n"
+            "'before' — power recorded before irradiation\n"
+            "'after' — power recorded after irradiation\n"
+            "'average' — mean of before and after\n\n"
+            "Use 'average' when the LED power drifts noticeably over the experiment."))
+        _pw_hdr.addStretch()
+        pw_col.addLayout(_pw_hdr)
         self._pw_combo = QComboBox()
         self._pw_combo.addItems(["before", "after", "average"])
         self._pw_combo.setMinimumWidth(100)
@@ -588,7 +642,19 @@ class _LEDCharacterisationPanel(QWidget):
         mode_col.setSpacing(4)
         _mode_lbl = QLabel("Integration mode")
         _mode_lbl.setObjectName("pref_label")
-        mode_col.addWidget(_mode_lbl)
+        _mode_hdr = QHBoxLayout()
+        _mode_hdr.setSpacing(4)
+        _mode_hdr.addWidget(_mode_lbl)
+        _mode_hdr.addWidget(InfoButton(
+            "Integration mode",
+            "'scalar' — fast mode: computes a single flux-weighted effective\n"
+            "wavelength λ_eff and one N value (mol s⁻¹). Use for monochromatic\n"
+            "or narrow-band LEDs.\n\n"
+            "'full' — spectral ODE integration: returns N(λ) as a spectrum CSV\n"
+            "for use with the full spectral quantum yield calculation. Required\n"
+            "for broad-band sources."))
+        _mode_hdr.addStretch()
+        mode_col.addLayout(_mode_hdr)
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("scalar  (fast, flux-weighted λ_eff)", "scalar")
         self._mode_combo.addItem("full  (spectral ODE integration)", "full")
@@ -601,9 +667,13 @@ class _LEDCharacterisationPanel(QWidget):
 
         row2 = QHBoxLayout()
         self._threshold_spin = self._dspin_s2(
-            row2, "Emission threshold\n(fraction of peak)", 0.0, 1.0, 0.005, 0.001, pref=True)
+            row2, "Emission threshold\n(fraction of peak)", 0.0, 1.0, 0.005, 0.001, pref=True,
+            info_title="Emission threshold",
+            info_text="Fraction of peak emission intensity below which spectral values are\nset to zero. Removes noise in the wings of the spectrum.\n\nTypical value: 0.005 (0.5 % of peak). Increase if wing noise is\nvisible in the photon flux spectrum.")
         self._std_spin = self._dspin_s2(
-            row2, "Manual N_std (mol s⁻¹)\n0 = auto from drift", 0.0, 1.0, 0.0, 1e-10, pref=True)
+            row2, "Manual N_std (mol s⁻¹)\n0 = auto from drift", 0.0, 1.0, 0.0, 1e-10, pref=True,
+            info_title="Manual N_std",
+            info_text="Manual standard deviation for the photon flux (mol s⁻¹).\nLeave at 0 to compute it automatically from LED power drift\n(difference between before/after power readings).\n\nSet manually only when you have an independent uncertainty estimate.")
         self._std_spin.setDecimals(10)
         row2.addStretch()
         self._stage2.add_layout(row2)
@@ -615,11 +685,25 @@ class _LEDCharacterisationPanel(QWidget):
         self._smooth_chk.setObjectName("pref_cb")
         self._smooth_chk.setChecked(True)
         self._smooth_chk.stateChanged.connect(self._on_smooth_toggled)
+        _smth_hdr = QHBoxLayout()
+        _smth_hdr.setSpacing(4)
+        _smth_hdr.addWidget(self._smooth_chk)
+        _smth_hdr.addWidget(InfoButton(
+            "Savitzky–Golay smoothing",
+            "Applies polynomial smoothing to the emission spectrum before\n"
+            "integration. Reduces noise without distorting peak positions.\n\n"
+            "Recommended for most measurements. Disable only if the raw\n"
+            "spectrum is already very clean or shows artefacts from smoothing."))
+        _smth_hdr.addStretch()
         smth_col.addWidget(QLabel(""))   # spacer to align with spinboxes
-        smth_col.addWidget(self._smooth_chk)
+        smth_col.addLayout(_smth_hdr)
         row3.addLayout(smth_col)
-        self._sg_window = self._ispin_s2(row3, "SG window\n(odd integer)", 3, 201, 11, pref=True)
-        self._sg_order  = self._ispin_s2(row3, "SG order", 1, 10, 3, pref=True)
+        self._sg_window = self._ispin_s2(row3, "SG window\n(odd integer)", 3, 201, 11, pref=True,
+            info_title="SG window",
+            info_text="Window size for Savitzky–Golay smoothing (must be odd).\nLarger windows give smoother spectra but can broaden peaks.\nTypical value: 11. Set to 3 for minimal smoothing.")
+        self._sg_order  = self._ispin_s2(row3, "SG order", 1, 10, 3, pref=True,
+            info_title="SG order",
+            info_text="Polynomial order for Savitzky–Golay smoothing.\nHigher order preserves sharper spectral features.\nMust be less than the window size.")
         row3.addStretch()
         self._stage2.add_layout(row3)
 
@@ -709,13 +793,22 @@ class _LEDCharacterisationPanel(QWidget):
         if path:
             edit.setText(path)
 
-    def _dspin_s2(self, parent, label, lo, hi, val, step, decimals=4, pref=False):
+    def _dspin_s2(self, parent, label, lo, hi, val, step, decimals=4, pref=False,
+                  info_title="", info_text=""):
         col = QVBoxLayout()
         col.setSpacing(4)
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        if info_text:
+            hdr = QHBoxLayout()
+            hdr.setSpacing(4)
+            hdr.addWidget(lbl)
+            hdr.addWidget(InfoButton(info_title, info_text))
+            hdr.addStretch()
+            col.addLayout(hdr)
+        else:
+            col.addWidget(lbl)
         spin = QDoubleSpinBox()
         spin.setRange(lo, hi)
         spin.setValue(val)
@@ -726,13 +819,22 @@ class _LEDCharacterisationPanel(QWidget):
         parent.addLayout(col)
         return spin
 
-    def _ispin_s2(self, parent, label, lo, hi, val, pref=False):
+    def _ispin_s2(self, parent, label, lo, hi, val, pref=False,
+                  info_title="", info_text=""):
         col = QVBoxLayout()
         col.setSpacing(4)
         lbl = QLabel(label)
         if pref:
             lbl.setObjectName("pref_label")
-        col.addWidget(lbl)
+        if info_text:
+            hdr = QHBoxLayout()
+            hdr.setSpacing(4)
+            hdr.addWidget(lbl)
+            hdr.addWidget(InfoButton(info_title, info_text))
+            hdr.addStretch()
+            col.addLayout(hdr)
+        else:
+            col.addWidget(lbl)
         spin = QSpinBox()
         spin.setRange(lo, hi)
         spin.setValue(val)

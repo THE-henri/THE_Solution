@@ -32,6 +32,7 @@ from gui.tabs.qy_core import (
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
+from gui.widgets.info_button import InfoButton
 from gui.worker import Worker
 
 
@@ -171,7 +172,12 @@ class QuantumYieldTab(QWidget):
         # ── Data type ────────────────────────────────────────────────────────
         self._data_type_combo = QComboBox()
         self._data_type_combo.addItems(["kinetic", "scanning"])
-        self._stage1.add_layout(_field_row("Data type:", self._data_type_combo, 120, pref=True))
+        _row_data_type = _field_row("Data type:", self._data_type_combo, 120, pref=True)
+        _row_data_type.insertWidget(1, InfoButton(
+            "Data type",
+            "'kinetic' — time-resolved absorbance at fixed wavelength(s)\n  (e.g. Cary 60 kinetics scan).\n\n'scanning' — full spectra recorded at multiple time points\n  (e.g. Cary 60 scanning kinetics mode).\n\nChoose the format that matches how your UV-Vis data was collected."
+        ))
+        self._stage1.add_layout(_row_data_type)
         self._data_type_combo.currentTextChanged.connect(self._on_data_type_changed)
 
         # ── Scanning-specific ─────────────────────────────────────────────────
@@ -183,15 +189,33 @@ class QuantumYieldTab(QWidget):
         self._delta_t_spin.setDecimals(3)
         self._delta_t_spin.setValue(12.0)
         self._delta_t_spin.setSuffix(" s")
-        sg.addLayout(_field_row("Δt per group (s):", self._delta_t_spin, 100, pref=True))
+        _row_delta_t = _field_row("Δt per group (s):", self._delta_t_spin, 100, pref=True)
+        _row_delta_t.insertWidget(1, InfoButton(
+            "Δt per group (s)",
+            "Time elapsed between consecutive scan groups (seconds).\nOnly used in scanning mode.\n\nCalculate as: (scan duration × scans per group) + any delay between groups.\nThis sets the time axis for the ODE fitting."
+        ))
+        sg.addLayout(_row_delta_t)
 
         self._scans_per_grp_spin = QSpinBox()
         self._scans_per_grp_spin.setRange(1, 100)
         self._scans_per_grp_spin.setValue(1)
-        sg.addLayout(_field_row("Scans per group:", self._scans_per_grp_spin, 80, pref=True))
+        _row_scans_per_grp = _field_row("Scans per group:", self._scans_per_grp_spin, 80, pref=True)
+        _row_scans_per_grp.insertWidget(1, InfoButton(
+            "Scans per group",
+            "Number of consecutive scans averaged into one time point.\nOnly used in scanning mode.\n\nHigher values reduce noise but lower temporal resolution.\nMatch to the averaging done on the spectrometer."
+        ))
+        sg.addLayout(_row_scans_per_grp)
 
         self._first_cycle_off_chk = QCheckBox("Skip first scan group")
-        sg.addWidget(self._first_cycle_off_chk)
+        _row_first_cycle = QHBoxLayout()
+        _row_first_cycle.setSpacing(6)
+        _row_first_cycle.addWidget(self._first_cycle_off_chk)
+        _row_first_cycle.addWidget(InfoButton(
+            "Skip first scan group",
+            "Excludes the first scan group from analysis.\n\nUseful when the first measurement contains baseline or\nsetup artefacts (e.g. shutter opening transient, lamp\nwarm-up, or mixing delay). Enable if the first time point\nappears as an outlier in the kinetic trace."
+        ))
+        _row_first_cycle.addStretch()
+        sg.addLayout(_row_first_cycle)
 
         self._stage1.add_widget(self._scan_grp)
         self._scan_grp.setVisible(False)
@@ -207,14 +231,22 @@ class QuantumYieldTab(QWidget):
         self._irr_wl_spin.setDecimals(1)
         self._irr_wl_spin.setValue(530.0)
         self._irr_wl_spin.setSuffix(" nm")
-        self._stage1.add_layout(_field_row(
-            "Irradiation λ:", self._irr_wl_spin, 120, pref=True))
+        _row_irr_wl = _field_row("Irradiation λ:", self._irr_wl_spin, 120, pref=True)
+        _row_irr_wl.insertWidget(1, InfoButton(
+            "Irradiation wavelength (nm)",
+            "Wavelength at which the sample was irradiated to drive\nthe photochemical reaction.\n\nUsed to:\n• look up ε_A and ε_B at the irradiation wavelength\n• select the photon flux from the actinometry CSV\n• compute the photon flux from power measurements"
+        ))
+        self._stage1.add_layout(_row_irr_wl)
 
         self._flux_src_combo = QComboBox()
         self._flux_src_combo.addItems([
             "manual_mol_s", "manual_uW", "actinometry", "led_spectrum"])
-        self._stage1.add_layout(_field_row(
-            "Photon flux source:", self._flux_src_combo, 140, pref=True))
+        _row_flux_src = _field_row("Photon flux source:", self._flux_src_combo, 140, pref=True)
+        _row_flux_src.insertWidget(1, InfoButton(
+            "Photon flux source",
+            "How the photon flux N (mol photons s\u207b\u00b9) is determined:\n\n'manual_mol_s' — enter N directly in mol s\u207b\u00b9\n'manual_\u00b5W' — enter optical power; converted via h\u03bd at irr. \u03bb\n'actinometry' — read N from a saved actinometry results CSV\n'led_spectrum' — integrate a saved LED spectrum CSV"
+        ))
+        self._stage1.add_layout(_row_flux_src)
         self._flux_src_combo.currentTextChanged.connect(self._on_flux_src_changed)
 
         # manual mol/s
@@ -225,13 +257,23 @@ class QuantumYieldTab(QWidget):
         self._flux_mol_s_spin.setDecimals(6)
         self._flux_mol_s_spin.setSingleStep(1e-10)
         self._flux_mol_s_spin.setValue(1e-9)
-        mg.addLayout(_field_row("N (mol s⁻¹):", self._flux_mol_s_spin, 120, pref=True))
+        _row_flux_mol_s = _field_row("N (mol s\u207b\u00b9):", self._flux_mol_s_spin, 120, pref=True)
+        _row_flux_mol_s.insertWidget(1, InfoButton(
+            "Photon flux N (mol s\u207b\u00b9)",
+            "Photon flux delivered to the sample in mol photons per second.\nObtained from chemical actinometry or power meter readings.\n\nTypical values: 1\u00d710\u207b\u2079 \u2013 1\u00d710\u207b\u2076 mol s\u207b\u00b9 for lab light sources."
+        ))
+        mg.addLayout(_row_flux_mol_s)
         self._flux_std_spin = QDoubleSpinBox()
         self._flux_std_spin.setRange(0, 1)
         self._flux_std_spin.setDecimals(6)
         self._flux_std_spin.setSingleStep(1e-11)
         self._flux_std_spin.setValue(0.0)
-        mg.addLayout(_field_row("N std (mol s⁻¹):", self._flux_std_spin, 120, pref=True))
+        _row_flux_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_std_spin, 120, pref=True)
+        _row_flux_std.insertWidget(1, InfoButton(
+            "Photon flux uncertainty (mol s\u207b\u00b9)",
+            "Standard deviation of the photon flux N.\nPropagated into the final quantum yield uncertainty.\n\nSet to 0 if unknown (uncertainty will not be reported)."
+        ))
+        mg.addLayout(_row_flux_std)
         self._stage1.add_widget(self._flux_manual_grp)
 
         # manual µW
@@ -242,12 +284,22 @@ class QuantumYieldTab(QWidget):
         self._flux_uw_spin.setDecimals(4)
         self._flux_uw_spin.setValue(0.0)
         self._flux_uw_spin.setSuffix(" µW")
-        ug.addLayout(_field_row("Power:", self._flux_uw_spin, 120))
+        _row_flux_uw = _field_row("Power:", self._flux_uw_spin, 120)
+        _row_flux_uw.insertWidget(1, InfoButton(
+            "Optical power (\u00b5W)",
+            "Optical power measured at the sample position in microwatts.\nConverted to mol s\u207b\u00b9 using: N = P\u00b7\u03bb / (N_A\u00b7h\u00b7c)\n\nMeasure with a calibrated power meter placed at the cuvette\nposition before and after the experiment."
+        ))
+        ug.addLayout(_row_flux_uw)
         self._flux_uw_std_spin = QDoubleSpinBox()
         self._flux_uw_std_spin.setRange(0, 1)
         self._flux_uw_std_spin.setDecimals(6)
         self._flux_uw_std_spin.setValue(0.0)
-        ug.addLayout(_field_row("N std (mol s⁻¹):", self._flux_uw_std_spin, 120))
+        _row_flux_uw_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_uw_std_spin, 120)
+        _row_flux_uw_std.insertWidget(1, InfoButton(
+            "Power standard deviation (\u00b5W)",
+            "Standard deviation of the power measurement (\u00b5W).\nPropagated through the power\u2192flux conversion into the\nfinal quantum yield uncertainty."
+        ))
+        ug.addLayout(_row_flux_uw_std)
         self._stage1.add_widget(self._flux_uw_grp)
 
         # actinometry CSV
@@ -264,8 +316,13 @@ class QuantumYieldTab(QWidget):
         self._actin_filter_spin.setRange(0, 1100)
         self._actin_filter_spin.setDecimals(1)
         self._actin_filter_spin.setValue(0.0)
-        self._actin_filter_spin.setSpecialValueText("(auto from irr λ)")
-        ag.addLayout(_field_row("Filter λ (nm):", self._actin_filter_spin, 100))
+        self._actin_filter_spin.setSpecialValueText("(auto from irr \u03bb)")
+        _row_actin_filter = _field_row("Filter \u03bb (nm):", self._actin_filter_spin, 100)
+        _row_actin_filter.insertWidget(1, InfoButton(
+            "Actinometry filter \u03bb (nm)",
+            "Wavelength (nm) used to look up the photon flux from the\nactinometry master CSV.\n\nSet to 0 to automatically use the irradiation wavelength.\nChange only if actinometry was run at a different wavelength\nand you want to interpolate to the irradiation wavelength."
+        ))
+        ag.addLayout(_row_actin_filter)
         self._stage1.add_widget(self._flux_actin_grp)
 
         # LED spectrum CSV
@@ -280,7 +337,12 @@ class QuantumYieldTab(QWidget):
                                   self._led_csv_browse))
         self._led_integ_combo = QComboBox()
         self._led_integ_combo.addItems(["scalar", "full"])
-        lg.addLayout(_field_row("Integration mode:", self._led_integ_combo, 80))
+        _row_led_integ = _field_row("Integration mode:", self._led_integ_combo, 80)
+        _row_led_integ.insertWidget(1, InfoButton(
+            "LED integration mode",
+            "'scalar' — computes a single effective wavelength and one N value.\n  Use for narrow-band LEDs.\n\n'full' — performs spectral ODE integration using N(\u03bb).\n  Required for broad-band sources or when precise spectral\n  weighting is needed."
+        ))
+        lg.addLayout(_row_led_integ)
         self._stage1.add_widget(self._flux_led_grp)
 
         parent_layout.addWidget(self._stage1)
@@ -308,18 +370,33 @@ class QuantumYieldTab(QWidget):
         # Case & identifiers
         self._case_combo = QComboBox()
         self._case_combo.addItems(["A_only", "AB_both", "A_thermal_PSS"])
-        self._stage2.add_layout(_field_row("Case:", self._case_combo, 140, pref=True))
+        _row_case = _field_row("Case:", self._case_combo, 140, pref=True)
+        _row_case.insertWidget(1, InfoButton(
+            "Photochemical case",
+            "Selects the kinetic model:\n\n'A_only' — irreversible A\u2192B reaction (no back-reaction).\n  Use for photobleaching or one-directional photoswitches.\n\n'AB_both' — bidirectional A\u21ccB. Both forward and reverse\n  quantum yields are fitted simultaneously.\n\n'A_thermal_PSS' — A\u2192B photoreaction with thermal B\u2192A\n  back-reaction. Use for T-type photoswitches."
+        ))
+        self._stage2.add_layout(_row_case)
 
         self._temp_spin = QDoubleSpinBox()
         self._temp_spin.setRange(-100, 200)
         self._temp_spin.setDecimals(1)
         self._temp_spin.setValue(25.0)
-        self._temp_spin.setSuffix(" °C")
-        self._stage2.add_layout(_field_row("Temperature:", self._temp_spin, 100, pref=True))
+        self._temp_spin.setSuffix(" \u00b0C")
+        _row_temp = _field_row("Temperature:", self._temp_spin, 100, pref=True)
+        _row_temp.insertWidget(1, InfoButton(
+            "Temperature (\u00b0C)",
+            "Measurement temperature in \u00b0C.\nStored in the results CSV for traceability.\nRequired when using the Eyring/Arrhenius k_th source\nto extrapolate k_th to the measurement temperature."
+        ))
+        self._stage2.add_layout(_row_temp)
 
         self._solvent_edit = QLineEdit()
         self._solvent_edit.setPlaceholderText("e.g. acetonitrile")
-        self._stage2.add_layout(_field_row("Solvent:", self._solvent_edit, 160, pref=True))
+        _row_solvent = _field_row("Solvent:", self._solvent_edit, 160, pref=True)
+        _row_solvent.insertWidget(1, InfoButton(
+            "Solvent",
+            "Solvent name — stored in results for traceability.\nDoes not affect the quantum yield calculation directly,\nbut solvent can influence extinction coefficients and\nshould be recorded consistently."
+        ))
+        self._stage2.add_layout(_row_solvent)
 
         # Optical
         self._path_spin = QDoubleSpinBox()
@@ -327,26 +404,46 @@ class QuantumYieldTab(QWidget):
         self._path_spin.setDecimals(4)
         self._path_spin.setValue(1.0)
         self._path_spin.setSuffix(" cm")
-        self._stage2.add_layout(_field_row("Path length:", self._path_spin, 100, pref=True))
+        _row_path = _field_row("Path length:", self._path_spin, 100, pref=True)
+        _row_path.insertWidget(1, InfoButton(
+            "Path length (cm)",
+            "Optical path length of the cuvette in centimetres.\nEnter the actual cuvette path — errors here propagate\ndirectly into the quantum yield via Beer\u2013Lambert."
+        ))
+        self._stage2.add_layout(_row_path)
 
         self._vol_spin = QDoubleSpinBox()
         self._vol_spin.setRange(0.001, 1000)
         self._vol_spin.setDecimals(3)
         self._vol_spin.setValue(2.0)
         self._vol_spin.setSuffix(" mL")
-        self._stage2.add_layout(_field_row("Volume:", self._vol_spin, 100, pref=True))
+        _row_vol = _field_row("Volume:", self._vol_spin, 100, pref=True)
+        _row_vol.insertWidget(1, InfoButton(
+            "Volume (mL)",
+            "Volume of solution in the cuvette in mL.\nUsed to convert photon flux density into absorbed photon rate.\n\nUse the actual illuminated volume, not the total cuvette volume\nif your illumination does not cover the full cuvette."
+        ))
+        self._stage2.add_layout(_row_vol)
 
         # Monitoring wavelengths
         self._mon_wl_edit = QLineEdit()
         self._mon_wl_edit.setPlaceholderText("e.g. 580, 620 — blank = auto from kinetic headers")
-        self._stage2.add_layout(_field_row("Monitoring λ (nm):", self._mon_wl_edit, 280, pref=True))
+        _row_mon_wl = _field_row("Monitoring \u03bb (nm):", self._mon_wl_edit, 280, pref=True)
+        _row_mon_wl.insertWidget(1, InfoButton(
+            "Monitoring wavelength(s) (nm)",
+            "Comma-separated list of wavelengths at which absorbance is\nmonitored during the experiment (e.g. '580, 620').\n\nLeave blank to use all wavelengths from the file headers.\nChoose wavelengths where A and B have maximum contrast for\nbest sensitivity."
+        ))
+        self._stage2.add_layout(_row_mon_wl)
 
         self._wl_tol_spin = QDoubleSpinBox()
         self._wl_tol_spin.setRange(0.1, 20)
         self._wl_tol_spin.setDecimals(1)
         self._wl_tol_spin.setValue(2.0)
         self._wl_tol_spin.setSuffix(" nm")
-        self._stage2.add_layout(_field_row("Wavelength tolerance:", self._wl_tol_spin, 100, pref=True))
+        _row_wl_tol = _field_row("Wavelength tolerance:", self._wl_tol_spin, 100, pref=True)
+        _row_wl_tol.insertWidget(1, InfoButton(
+            "Wavelength tolerance (nm)",
+            "Search window around each monitoring wavelength.\nAbsorbance at the closest measured wavelength within \u00b1tolerance\nis extracted.\n\nIncrease if your spectrometer uses non-integer wavelengths or\nif the grid spacing is coarser than 1 nm."
+        ))
+        self._stage2.add_layout(_row_wl_tol)
 
         # Baseline correction
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -354,8 +451,12 @@ class QuantumYieldTab(QWidget):
 
         self._baseline_combo = QComboBox()
         self._baseline_combo.addItems(["first_point", "none", "plateau", "file"])
-        self._stage2.add_layout(
-            _field_row("Offset correction:", self._baseline_combo, 120))
+        _row_baseline = _field_row("Offset correction:", self._baseline_combo, 120)
+        _row_baseline.insertWidget(1, InfoButton(
+            "Offset correction method",
+            "How to remove the baseline offset from the kinetic traces:\n\n'first_point' — subtract the very first data point.\n'none' — no correction applied.\n'plateau' — subtract the mean of a flat plateau region.\n'file' — load an external baseline spectrum.\n\nUse 'plateau' when a stable equilibrium is reached at the end."
+        ))
+        self._stage2.add_layout(_row_baseline)
         self._baseline_combo.currentTextChanged.connect(self._on_baseline_changed)
 
         self._baseline_plat_grp = QGroupBox("Plateau offset")
@@ -365,19 +466,34 @@ class QuantumYieldTab(QWidget):
         self._plat_dur_spin.setDecimals(1)
         self._plat_dur_spin.setValue(20.0)
         self._plat_dur_spin.setSuffix(" s")
-        bpg.addLayout(_field_row("Plateau duration:", self._plat_dur_spin, 100))
+        _row_plat_dur = _field_row("Plateau duration:", self._plat_dur_spin, 100)
+        _row_plat_dur.insertWidget(1, InfoButton(
+            "Plateau duration (s)",
+            "Duration of the flat plateau region used for baseline averaging.\nThe plateau is taken from the end of the trace unless\n'Start' and 'End' are specified manually.\n\nSet long enough to average out noise but avoid including\nany drift."
+        ))
+        bpg.addLayout(_row_plat_dur)
         self._plat_start_spin = QDoubleSpinBox()
         self._plat_start_spin.setRange(0, 1e6)
         self._plat_start_spin.setDecimals(1)
         self._plat_start_spin.setValue(0.0)
         self._plat_start_spin.setSpecialValueText("(auto)")
-        bpg.addLayout(_field_row("Start (s):", self._plat_start_spin, 100))
+        _row_plat_start = _field_row("Start (s):", self._plat_start_spin, 100)
+        _row_plat_start.insertWidget(1, InfoButton(
+            "Plateau start (s)",
+            "Start of the baseline plateau region in seconds.\nSet to 0 for automatic detection from the end of the trace."
+        ))
+        bpg.addLayout(_row_plat_start)
         self._plat_end_spin = QDoubleSpinBox()
         self._plat_end_spin.setRange(0, 1e6)
         self._plat_end_spin.setDecimals(1)
         self._plat_end_spin.setValue(0.0)
         self._plat_end_spin.setSpecialValueText("(auto)")
-        bpg.addLayout(_field_row("End (s):", self._plat_end_spin, 100))
+        _row_plat_end = _field_row("End (s):", self._plat_end_spin, 100)
+        _row_plat_end.insertWidget(1, InfoButton(
+            "Plateau end (s)",
+            "End of the baseline plateau region in seconds.\nSet to 0 for automatic detection from the end of the trace."
+        ))
+        bpg.addLayout(_row_plat_end)
         self._stage2.add_widget(self._baseline_plat_grp)
         self._baseline_plat_grp.setVisible(False)
 
@@ -399,7 +515,15 @@ class QuantumYieldTab(QWidget):
 
         self._auto_detect_chk = QCheckBox("Auto-detect irradiation start")
         self._auto_detect_chk.setChecked(True)
-        self._stage2.add_widget(self._auto_detect_chk)
+        _row_auto_detect = QHBoxLayout()
+        _row_auto_detect.setSpacing(6)
+        _row_auto_detect.addWidget(self._auto_detect_chk)
+        _row_auto_detect.addWidget(InfoButton(
+            "Auto-detect irradiation start",
+            "Automatically locates the time point where irradiation begins\nby detecting when the absorbance rises above the baseline noise.\n\nDisable and set the fit window manually if auto-detection\nfails (e.g. slow-starting reactions or very noisy baselines)."
+        ))
+        _row_auto_detect.addStretch()
+        self._stage2.add_layout(_row_auto_detect)
         self._auto_detect_chk.toggled.connect(self._on_autodetect_toggled)
 
         self._auto_detect_grp = QGroupBox("Auto-detect parameters")
@@ -407,16 +531,31 @@ class QuantumYieldTab(QWidget):
         self._n_plat_spin = QSpinBox()
         self._n_plat_spin.setRange(3, 200)
         self._n_plat_spin.setValue(20)
-        adg.addLayout(_field_row("Plateau points:", self._n_plat_spin, 80))
+        _row_n_plat = _field_row("Plateau points:", self._n_plat_spin, 80)
+        _row_n_plat.insertWidget(1, InfoButton(
+            "Plateau points",
+            "Minimum number of consecutive points used to define the\npre-irradiation plateau for onset detection.\n\nIncrease for noisy baselines to reduce false positives.\nTypical value: 10\u201330 points."
+        ))
+        adg.addLayout(_row_n_plat)
         self._detect_thresh_spin = QDoubleSpinBox()
         self._detect_thresh_spin.setRange(0.5, 100)
         self._detect_thresh_spin.setDecimals(1)
         self._detect_thresh_spin.setValue(5.0)
-        adg.addLayout(_field_row("Threshold (σ):", self._detect_thresh_spin, 80))
+        _row_detect_thresh = _field_row("Threshold (\u03c3):", self._detect_thresh_spin, 80)
+        _row_detect_thresh.insertWidget(1, InfoButton(
+            "Detection threshold (\u03c3)",
+            "Number of standard deviations above the baseline noise\nrequired to flag a point as the irradiation onset.\n\nLower values (e.g. 2) detect subtle changes but increase\nfalse positive rate. Higher values (e.g. 5) are more robust\nbut may miss slow-rising reactions."
+        ))
+        adg.addLayout(_row_detect_thresh)
         self._min_consec_spin = QSpinBox()
         self._min_consec_spin.setRange(1, 20)
         self._min_consec_spin.setValue(3)
-        adg.addLayout(_field_row("Min consecutive:", self._min_consec_spin, 80))
+        _row_min_consec = _field_row("Min consecutive:", self._min_consec_spin, 80)
+        _row_min_consec.insertWidget(1, InfoButton(
+            "Minimum consecutive points",
+            "Number of consecutive points that must all exceed the\ndetection threshold before the irradiation onset is confirmed.\n\nHigher values reduce false positives from single-point spikes.\nTypical value: 3\u20135."
+        ))
+        adg.addLayout(_row_min_consec)
         self._stage2.add_widget(self._auto_detect_grp)
 
         self._manual_window_grp = QGroupBox("Manual fit window")
@@ -426,13 +565,23 @@ class QuantumYieldTab(QWidget):
         self._fit_start_spin.setDecimals(1)
         self._fit_start_spin.setValue(0.0)
         self._fit_start_spin.setSpecialValueText("(auto)")
-        mwg.addLayout(_field_row("Fit start (s):", self._fit_start_spin, 100))
+        _row_fit_start = _field_row("Fit start (s):", self._fit_start_spin, 100)
+        _row_fit_start.insertWidget(1, InfoButton(
+            "Fit window start (s)",
+            "Manual start of the fitting window in seconds.\nSet to 0 to use the auto-detected irradiation onset.\n\nUse a manual value to skip an initial transient or when\nauto-detection places the onset incorrectly."
+        ))
+        mwg.addLayout(_row_fit_start)
         self._fit_end_spin = QDoubleSpinBox()
         self._fit_end_spin.setRange(0, 1e6)
         self._fit_end_spin.setDecimals(1)
         self._fit_end_spin.setValue(0.0)
         self._fit_end_spin.setSpecialValueText("(auto)")
-        mwg.addLayout(_field_row("Fit end (s):", self._fit_end_spin, 100))
+        _row_fit_end = _field_row("Fit end (s):", self._fit_end_spin, 100)
+        _row_fit_end.insertWidget(1, InfoButton(
+            "Fit window end (s)",
+            "Manual end of the fitting window in seconds.\nSet to 0 to use the full trace after the onset.\n\nTruncate the window if the reaction reaches equilibrium\nbefore the end of the measurement."
+        ))
+        mwg.addLayout(_row_fit_end)
         self._stage2.add_widget(self._manual_window_grp)
         self._manual_window_grp.setVisible(False)
 
@@ -443,8 +592,12 @@ class QuantumYieldTab(QWidget):
         self._kth_src_combo = QComboBox()
         self._kth_src_combo.addItems(
             ["none", "manual", "half_life_master", "eyring", "arrhenius"])
-        self._stage2.add_layout(
-            _field_row("k_th source:", self._kth_src_combo, 140, pref=True))
+        _row_kth_src = _field_row("k_th source:", self._kth_src_combo, 140, pref=True)
+        _row_kth_src.insertWidget(1, InfoButton(
+            "Thermal rate constant source (k_th)",
+            "Source for the thermal back-reaction rate k_th (s\u207b\u00b9):\n\n'none' — no thermal correction (pure photoreaction).\n'manual' — enter k_th directly.\n'half_life_master' — read from saved half-life results.\n'eyring' / 'arrhenius' — extrapolate from Eyring/Arrhenius fit at the measurement temperature."
+        ))
+        self._stage2.add_layout(_row_kth_src)
         self._kth_src_combo.currentTextChanged.connect(self._on_kth_src_changed)
 
         self._kth_manual_grp = QGroupBox("Manual k_th")
@@ -454,14 +607,24 @@ class QuantumYieldTab(QWidget):
         self._kth_manual_spin.setDecimals(8)
         self._kth_manual_spin.setSingleStep(1e-6)
         self._kth_manual_spin.setValue(0.0)
-        self._kth_manual_spin.setSuffix(" s⁻¹")
-        kmg.addLayout(_field_row("k_th:", self._kth_manual_spin, 140))
+        self._kth_manual_spin.setSuffix(" s\u207b\u00b9")
+        _row_kth_manual = _field_row("k_th:", self._kth_manual_spin, 140)
+        _row_kth_manual.insertWidget(1, InfoButton(
+            "k_th (s\u207b\u00b9)",
+            "Thermal back-reaction rate constant in s\u207b\u00b9.\nObtained from a separate thermal relaxation experiment\n(half-life measurement).\n\nk_th = ln(2) / t\u00bd\nTypical values: 10\u207b\u2075 \u2013 10\u207b\u00b9 s\u207b\u00b9 for T-type photoswitches."
+        ))
+        kmg.addLayout(_row_kth_manual)
         self._kth_manual_std_spin = QDoubleSpinBox()
         self._kth_manual_std_spin.setRange(0, 1e6)
         self._kth_manual_std_spin.setDecimals(8)
         self._kth_manual_std_spin.setValue(0.0)
-        self._kth_manual_std_spin.setSuffix(" s⁻¹")
-        kmg.addLayout(_field_row("k_th std:", self._kth_manual_std_spin, 140))
+        self._kth_manual_std_spin.setSuffix(" s\u207b\u00b9")
+        _row_kth_manual_std = _field_row("k_th std:", self._kth_manual_std_spin, 140)
+        _row_kth_manual_std.insertWidget(1, InfoButton(
+            "k_th uncertainty (s\u207b\u00b9)",
+            "Standard deviation of k_th.\nPropagated into the final quantum yield uncertainty.\nObtained from the standard error of the half-life fit."
+        ))
+        kmg.addLayout(_row_kth_manual_std)
         self._stage2.add_widget(self._kth_manual_grp)
         self._kth_manual_grp.setVisible(False)
 
@@ -478,8 +641,13 @@ class QuantumYieldTab(QWidget):
         self._kth_temp_spin.setRange(-100, 200)
         self._kth_temp_spin.setDecimals(1)
         self._kth_temp_spin.setValue(25.0)
-        self._kth_temp_spin.setSuffix(" °C")
-        kcg.addLayout(_field_row("Temperature:", self._kth_temp_spin, 100, pref=True))
+        self._kth_temp_spin.setSuffix(" \u00b0C")
+        _row_kth_temp = _field_row("Temperature:", self._kth_temp_spin, 100, pref=True)
+        _row_kth_temp.insertWidget(1, InfoButton(
+            "Temperature for k_th lookup (\u00b0C)",
+            "Temperature at which to evaluate k_th from the Eyring or\nArrhenius model.\n\nDefaults to the measurement temperature above. Change only\nif you want to evaluate at a different temperature (e.g. to\nextrapolate from a calibration temperature)."
+        ))
+        kcg.addLayout(_row_kth_temp)
         self._stage2.add_widget(self._kth_csv_grp)
         self._kth_csv_grp.setVisible(False)
 
@@ -490,17 +658,32 @@ class QuantumYieldTab(QWidget):
         psg = QVBoxLayout(self._pss_grp)
         self._pss_src_combo = QComboBox()
         self._pss_src_combo.addItems(["manual_fraction", "manual_absorbance"])
-        psg.addLayout(_field_row("PSS source:", self._pss_src_combo, 160))
+        _row_pss_src = _field_row("PSS source:", self._pss_src_combo, 160)
+        _row_pss_src.insertWidget(1, InfoButton(
+            "PSS composition source",
+            "How the photostationary state (PSS) composition is specified:\n\n'manual_fraction' — enter the fraction of species B at PSS directly.\n'manual_absorbance' — enter the absorbance of species A at PSS\n  (the fraction is derived from this and the initial absorbance)."
+        ))
+        psg.addLayout(_row_pss_src)
         self._pss_frac_spin = QDoubleSpinBox()
         self._pss_frac_spin.setRange(0, 1)
         self._pss_frac_spin.setDecimals(4)
         self._pss_frac_spin.setValue(0.85)
-        psg.addLayout(_field_row("PSS fraction B:", self._pss_frac_spin, 100))
+        _row_pss_frac = _field_row("PSS fraction B:", self._pss_frac_spin, 100)
+        _row_pss_frac.insertWidget(1, InfoButton(
+            "PSS fraction of species B",
+            "Mole fraction of species B at the photostationary state.\nRange: 0 (pure A) to 1 (pure B).\n\nMeasure by NMR, HPLC, or from spectral deconvolution.\nTypical values for efficient T-type switches: 0.5\u20130.95."
+        ))
+        psg.addLayout(_row_pss_frac)
         self._pss_abs_spin = QDoubleSpinBox()
         self._pss_abs_spin.setRange(0, 10)
         self._pss_abs_spin.setDecimals(4)
         self._pss_abs_spin.setValue(0.0)
-        psg.addLayout(_field_row("A_abs at PSS:", self._pss_abs_spin, 100))
+        _row_pss_abs = _field_row("A_abs at PSS:", self._pss_abs_spin, 100)
+        _row_pss_abs.insertWidget(1, InfoButton(
+            "Absorbance of A at PSS",
+            "Absorbance contribution of species A at the monitoring\nwavelength when the PSS has been reached.\n\nRead from the kinetic trace plateau or from spectral\ndeconvolution after PSS irradiation."
+        ))
+        psg.addLayout(_row_pss_abs)
         self._stage2.add_widget(self._pss_grp)
         self._pss_grp.setVisible(False)
         self._case_combo.currentTextChanged.connect(self._on_case_changed)
@@ -510,8 +693,12 @@ class QuantumYieldTab(QWidget):
         sep5.setStyleSheet("color:#555;"); self._stage2.add_widget(sep5)
         self._init_src_combo = QComboBox()
         self._init_src_combo.addItems(["absorbance", "manual"])
-        self._stage2.add_layout(
-            _field_row("Initial conc. source:", self._init_src_combo, 120))
+        _row_init_src = _field_row("Initial conc. source:", self._init_src_combo, 120)
+        _row_init_src.insertWidget(1, InfoButton(
+            "Initial concentration source",
+            "How the initial concentrations [A]\u2080 and [B]\u2080 are determined:\n\n'absorbance' — derived from the initial absorbance and\n  the extinction coefficients (recommended).\n\n'manual' — enter concentrations directly in mol/L.\n  Use when extinction coefficients are not available."
+        ))
+        self._stage2.add_layout(_row_init_src)
         self._init_src_combo.currentTextChanged.connect(self._on_init_src_changed)
 
         self._init_manual_grp = QGroupBox("Manual initial concentrations")
@@ -521,13 +708,23 @@ class QuantumYieldTab(QWidget):
         self._conc_A0_spin.setDecimals(8)
         self._conc_A0_spin.setValue(0.0)
         self._conc_A0_spin.setSuffix(" mol/L")
-        img.addLayout(_field_row("[A]₀ (mol/L):", self._conc_A0_spin, 140))
+        _row_conc_A0 = _field_row("[A]\u2080 (mol/L):", self._conc_A0_spin, 140)
+        _row_conc_A0.insertWidget(1, InfoButton(
+            "Initial concentration [A]\u2080 (mol/L)",
+            "Initial molar concentration of species A.\nOnly used when the initial concentration source is 'manual'.\n\nDetermine from: [A]\u2080 = A\u2080 / (\u03b5_A \u00d7 l)"
+        ))
+        img.addLayout(_row_conc_A0)
         self._conc_B0_spin = QDoubleSpinBox()
         self._conc_B0_spin.setRange(0, 1)
         self._conc_B0_spin.setDecimals(8)
         self._conc_B0_spin.setValue(0.0)
         self._conc_B0_spin.setSuffix(" mol/L")
-        img.addLayout(_field_row("[B]₀ (mol/L):", self._conc_B0_spin, 140))
+        _row_conc_B0 = _field_row("[B]\u2080 (mol/L):", self._conc_B0_spin, 140)
+        _row_conc_B0.insertWidget(1, InfoButton(
+            "Initial concentration [B]\u2080 (mol/L)",
+            "Initial molar concentration of species B.\nTypically 0 unless the sample already contains B before irradiation.\n\nOnly used when the initial concentration source is 'manual'."
+        ))
+        img.addLayout(_row_conc_B0)
         self._stage2.add_widget(self._init_manual_grp)
         self._init_manual_grp.setVisible(False)
 
@@ -559,11 +756,16 @@ class QuantumYieldTab(QWidget):
         self._stage3.add_widget(hint)
 
         # ε_A
-        eps_a_grp = QGroupBox("ε_A (isomer A / reactant)")
+        eps_a_grp = QGroupBox("\u03b5_A (isomer A / reactant)")
         eag = QVBoxLayout(eps_a_grp)
         self._eps_a_src_combo = QComboBox()
         self._eps_a_src_combo.addItems(["manual", "csv"])
-        eag.addLayout(_field_row("Source:", self._eps_a_src_combo, 80, pref=True))
+        _row_eps_a_src = _field_row("Source:", self._eps_a_src_combo, 80, pref=True)
+        _row_eps_a_src.insertWidget(1, InfoButton(
+            "\u03b5_A source",
+            "Source for the molar extinction coefficient of species A at the irradiation wavelength:\n\n'manual' — enter \u03b5_A directly in M\u207b\u00b9cm\u207b\u00b9.\n'csv' — interpolate from a saved extinction coefficient CSV\n  (output of the Extinction Coefficients tab)."
+        ))
+        eag.addLayout(_row_eps_a_src)
         self._eps_a_src_combo.currentTextChanged.connect(
             lambda t: self._on_eps_src_changed("A", t))
 
@@ -573,20 +775,30 @@ class QuantumYieldTab(QWidget):
         self._eps_a_irr_spin.setRange(0, 1e7)
         self._eps_a_irr_spin.setDecimals(1)
         self._eps_a_irr_spin.setValue(10000.0)
-        self._eps_a_irr_spin.setSuffix(" M⁻¹cm⁻¹")
-        eamg.addLayout(_field_row("ε_A at irr λ:", self._eps_a_irr_spin, 140, pref=True))
+        self._eps_a_irr_spin.setSuffix(" M\u207b\u00b9cm\u207b\u00b9")
+        _row_eps_a_irr = _field_row("\u03b5_A at irr \u03bb:", self._eps_a_irr_spin, 140, pref=True)
+        _row_eps_a_irr.insertWidget(1, InfoButton(
+            "\u03b5_A at irradiation \u03bb (M\u207b\u00b9cm\u207b\u00b9)",
+            "Molar extinction coefficient of species A at the irradiation\nwavelength in M\u207b\u00b9cm\u207b\u00b9.\n\nDetermine from a Beer\u2013Lambert plot using pure-A solutions.\nTypical values: 10\u00b2 \u2013 10\u2075 M\u207b\u00b9cm\u207b\u00b9."
+        ))
+        eamg.addLayout(_row_eps_a_irr)
         eag.addWidget(self._eps_a_manual_grp)
 
         self._eps_a_csv_grp = QGroupBox("")
         eacg = QVBoxLayout(self._eps_a_csv_grp)
         self._eps_a_csv_edit = QLineEdit()
-        self._eps_a_csv_edit.setPlaceholderText("extinction_coeff_master.csv …")
-        self._eps_a_csv_browse = QPushButton("Browse…")
+        self._eps_a_csv_edit.setPlaceholderText("extinction_coeff_master.csv \u2026")
+        self._eps_a_csv_browse = QPushButton("Browse\u2026")
         self._eps_a_csv_browse.setFixedWidth(80)
         self._eps_a_csv_browse.clicked.connect(self._browse_eps_a_csv)
         eacg.addLayout(_browse_row("CSV:", self._eps_a_csv_edit, self._eps_a_csv_browse))
         self._eps_a_col_edit = QLineEdit("Mean")
-        eacg.addLayout(_field_row("Column:", self._eps_a_col_edit, 100))
+        _row_eps_a_col = _field_row("Column:", self._eps_a_col_edit, 100)
+        _row_eps_a_col.insertWidget(1, InfoButton(
+            "CSV column name (\u03b5_A)",
+            "Column name in the extinction coefficient CSV to use for \u03b5_A.\nThe CSV must contain a 'wavelength_nm' column and at least\none data column (e.g. 'Mean', 'epsilon').\n\nLeave as 'Mean' if the CSV was generated by the\nExtinction Coefficients tab."
+        ))
+        eacg.addLayout(_row_eps_a_col)
         eag.addWidget(self._eps_a_csv_grp)
         self._eps_a_csv_grp.setVisible(False)
         self._stage3.add_widget(eps_a_grp)
