@@ -179,6 +179,8 @@ class PlotWidget(QWidget):
     def _save_image(self):
         if self._fig is None:
             return
+        if self._save_dir:
+            self._save_dir.mkdir(parents=True, exist_ok=True)
         if self._save_dir and self._default_filename:
             start = str(self._save_dir / self._default_filename)
         elif self._save_dir:

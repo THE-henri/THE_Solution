@@ -25,10 +25,12 @@ from PyQt6.QtWidgets import (
     QGroupBox,
 )
 
+import pandas as pd
+
 from gui.tabs.qy_core import (
     QYParams, QYFileResult,
     load_photon_flux, load_epsilon_at_wavelength, load_epsilon_at_wavelengths,
-    load_k_th, run_qy_file, plot_qy_result,
+    load_k_th, run_qy_file, plot_qy_result, plot_qy_led_diagnostic,
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
@@ -96,6 +98,7 @@ class QuantumYieldTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._output_path: Optional[Path] = None
+        self._raw_path:    Optional[Path] = None
         self._results:     list[QYFileResult] = []
         self._current_idx: int = 0
         self._worker:      Optional[Worker] = None
@@ -124,6 +127,7 @@ class QuantumYieldTab(QWidget):
         self._build_stage3(layout)
         self._build_stage4(layout)
         layout.addStretch()
+        self._connect_stale_signals()
 
     # ── Stage 1 — Input Files & Photon Flux ──────────────────────────────────
 
@@ -234,9 +238,21 @@ class QuantumYieldTab(QWidget):
         _row_irr_wl = _field_row("Irradiation λ:", self._irr_wl_spin, 120, pref=True)
         _row_irr_wl.insertWidget(1, InfoButton(
             "Irradiation wavelength (nm)",
-            "Wavelength at which the sample was irradiated to drive\nthe photochemical reaction.\n\nUsed to:\n• look up ε_A and ε_B at the irradiation wavelength\n• select the photon flux from the actinometry CSV\n• compute the photon flux from power measurements"
+            "Wavelength at which the sample is irradiated.\n\nUsed to:\n"
+            "• compute the absorbed-light fraction for the initial-slope\n"
+            "  QY estimate:  f = 1 − 10^(−ε_A(λ_irr) · c · l)\n"
+            "• convert optical power (µW → mol s⁻¹) via E = hν\n"
+            "• select the matching row from an actinometry CSV\n\n"
+            "Not used in LED full-integration mode (field is hidden):\n"
+            "in that mode the absorbed flux is integrated spectrally\n"
+            "from N(λ) and ε_A(λ) across the full LED spectrum."
         ))
-        self._stage1.add_layout(_row_irr_wl)
+        self._irr_wl_widget = QWidget()
+        _irr_wl_container = QVBoxLayout(self._irr_wl_widget)
+        _irr_wl_container.setContentsMargins(0, 0, 0, 0)
+        _irr_wl_container.setSpacing(0)
+        _irr_wl_container.addLayout(_row_irr_wl)
+        self._stage1.add_widget(self._irr_wl_widget)
 
         self._flux_src_combo = QComboBox()
         self._flux_src_combo.addItems([
@@ -343,6 +359,7 @@ class QuantumYieldTab(QWidget):
             "'scalar' — computes a single effective wavelength and one N value.\n  Use for narrow-band LEDs.\n\n'full' — performs spectral ODE integration using N(\u03bb).\n  Required for broad-band sources or when precise spectral\n  weighting is needed."
         ))
         lg.addLayout(_row_led_integ)
+        self._led_integ_combo.currentTextChanged.connect(self._update_irr_wl_visibility)
         self._stage1.add_widget(self._flux_led_grp)
 
         parent_layout.addWidget(self._stage1)
@@ -883,11 +900,37 @@ class QuantumYieldTab(QWidget):
         self._unconstrained_chk = QCheckBox("Unconstrained fit (no bounds)")
         self._stage4.add_widget(self._unconstrained_chk)
 
+        slopes_hdr = QHBoxLayout()
+        self._slopes_chk = QCheckBox("Compute initial slopes estimate")
+        self._slopes_chk.setChecked(True)
+        self._slopes_chk.toggled.connect(self._on_slopes_toggled)
+        slopes_hdr.addWidget(self._slopes_chk)
+        slopes_hdr.addWidget(InfoButton(
+            "Initial slopes estimate",
+            "Estimates Φ_AB from the linear slope of the absorbance trace\n"
+            "at the very start of irradiation, using:\n\n"
+            "  Φ_AB = −(dA/dt)·V / (Δε·l·N_abs)\n\n"
+            "The result is shown as a purple dotted tangent line on each\n"
+            "kinetic trace and labelled with the estimated Φ.\n\n"
+            "Disable when only a few data points are recorded before the\n"
+            "trace becomes non-linear, or when the signal-to-noise is too\n"
+            "low for a reliable linear fit — in those cases the estimate\n"
+            "is meaningless and clutters the plot.\n\n"
+            "'Points' sets how many initial data points are used for the\n"
+            "linear fit. Use fewer points for fast reactions."
+        ))
+        slopes_hdr.addStretch()
+        self._stage4.add_layout(slopes_hdr)
+
+        self._slopes_grp = QGroupBox()
+        self._slopes_grp.setFlat(True)
+        sg = QVBoxLayout(self._slopes_grp)
+        sg.setContentsMargins(0, 0, 0, 0)
         self._n_slopes_spin = QSpinBox()
         self._n_slopes_spin.setRange(3, 100)
         self._n_slopes_spin.setValue(8)
-        self._stage4.add_layout(
-            _field_row("Initial slopes pts:", self._n_slopes_spin, 80))
+        sg.addLayout(_field_row("Points:", self._n_slopes_spin, 80))
+        self._stage4.add_widget(self._slopes_grp)
 
         self._qy_ref_edit = QLineEdit()
         self._qy_ref_edit.setPlaceholderText("(optional) reference Φ_AB for fixed-BA fit")
@@ -930,6 +973,56 @@ class QuantumYieldTab(QWidget):
         self._plot.setMinimumHeight(320)
         self._stage4.add_widget(self._plot)
 
+        # ── LED spectral diagnostic toggle ────────────────────────────────────
+        sep_diag = QFrame(); sep_diag.setFrameShape(QFrame.Shape.HLine)
+        sep_diag.setStyleSheet("color:#555;"); self._stage4.add_widget(sep_diag)
+
+        diag_row = QHBoxLayout()
+        self._led_diag_chk = QCheckBox("LED spectral diagnostic")
+        self._led_diag_chk.toggled.connect(self._on_led_diag_toggled)
+        diag_row.addWidget(self._led_diag_chk)
+        diag_row.addWidget(InfoButton(
+            "LED spectral diagnostic",
+            "Shows a two-panel diagnostic figure for LED full-integration mode.\n\n"
+            "Left panel  — spectral overlap: N(λ) (LED emission) overlaid with\n"
+            "  ε_A(λ) or A(λ) on a twin y-axis. Monitoring wavelengths are marked.\n\n"
+            "Right panel — absorbed-photon weighting:\n"
+            "  • If ε_A CSV is provided in Stage 3: exact spectral absorbed flux\n"
+            "    N(λ)·(1−10^(−ε_A·c₀·l)), integrated to give N_abs and the\n"
+            "    absorbed fraction.\n"
+            "  • If only an initial spectrum is uploaded below: normalised\n"
+            "    N(λ)·A(λ) overlap (qualitative).\n\n"
+            "Requires 'led_spectrum' as photon flux source."
+        ))
+        diag_row.addStretch()
+        self._stage4.add_layout(diag_row)
+
+        # Optional initial absorption spectrum upload (shown when toggled on)
+        self._led_diag_spec_grp = QGroupBox("Initial absorption spectrum (optional)")
+        dsg = QVBoxLayout(self._led_diag_spec_grp)
+        self._led_diag_spec_edit = QLineEdit()
+        self._led_diag_spec_edit.setPlaceholderText(
+            "CSV with columns: wavelength_nm, absorbance  (or epsilon)")
+        self._led_diag_spec_browse = QPushButton("Browse…")
+        self._led_diag_spec_browse.setFixedWidth(80)
+        self._led_diag_spec_browse.clicked.connect(self._browse_init_spec)
+        self._led_diag_spec_edit.textChanged.connect(self._refresh_led_diag)
+        dsg.addLayout(_browse_row("CSV:", self._led_diag_spec_edit,
+                                   self._led_diag_spec_browse))
+        dsg.addWidget(_label(
+            "Upload the initial absorbance or extinction spectrum of the sample "
+            "to overlay with the LED emission. Required only when ε_A source is "
+            "'manual' in Stage 3.",
+            color="#888"))
+        self._stage4.add_widget(self._led_diag_spec_grp)
+        self._led_diag_spec_grp.setVisible(False)
+
+        # Diagnostic plot widget (hidden until toggled)
+        self._led_diag_plot = PlotWidget()
+        self._led_diag_plot.setMinimumHeight(320)
+        self._stage4.add_widget(self._led_diag_plot)
+        self._led_diag_plot.setVisible(False)
+
         # Summary table
         self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels([
@@ -951,6 +1044,58 @@ class QuantumYieldTab(QWidget):
 
         parent_layout.addWidget(self._stage4)
 
+    # ── Stale-result detection ────────────────────────────────────────────────
+
+    def _mark_stale(self):
+        if self._results:
+            self._stage4.set_status(STALE)
+
+    def _connect_stale_signals(self):
+        """Connect every Stage 1–3 input widget to _mark_stale."""
+        # ── Stage 1 ──────────────────────────────────────────────────────────
+        for w in (self._data_type_combo, self._flux_src_combo,
+                  self._led_integ_combo):
+            w.currentTextChanged.connect(self._mark_stale)
+        for w in (self._delta_t_spin, self._scans_per_grp_spin,
+                  self._irr_wl_spin, self._flux_mol_s_spin,
+                  self._flux_std_spin, self._flux_uw_spin,
+                  self._flux_uw_std_spin, self._actin_filter_spin):
+            w.valueChanged.connect(self._mark_stale)
+        self._first_cycle_off_chk.toggled.connect(self._mark_stale)
+        for w in (self._actin_csv_edit, self._led_csv_edit):
+            w.textChanged.connect(self._mark_stale)
+        self._file_list.model().rowsInserted.connect(self._mark_stale)
+        self._file_list.model().rowsRemoved.connect(self._mark_stale)
+
+        # ── Stage 2 ──────────────────────────────────────────────────────────
+        for w in (self._case_combo, self._baseline_combo, self._kth_src_combo,
+                  self._pss_src_combo, self._init_src_combo):
+            w.currentTextChanged.connect(self._mark_stale)
+        for w in (self._temp_spin, self._path_spin, self._vol_spin,
+                  self._wl_tol_spin, self._plat_dur_spin,
+                  self._plat_start_spin, self._plat_end_spin,
+                  self._n_plat_spin, self._detect_thresh_spin,
+                  self._min_consec_spin, self._fit_start_spin,
+                  self._fit_end_spin, self._kth_manual_spin,
+                  self._kth_manual_std_spin, self._kth_temp_spin,
+                  self._pss_frac_spin, self._pss_abs_spin,
+                  self._conc_A0_spin, self._conc_B0_spin):
+            w.valueChanged.connect(self._mark_stale)
+        self._auto_detect_chk.toggled.connect(self._mark_stale)
+        self._slopes_chk.toggled.connect(self._mark_stale)
+        for w in (self._mon_wl_edit, self._solvent_edit,
+                  self._baseline_file_edit, self._kth_csv_edit):
+            w.textChanged.connect(self._mark_stale)
+
+        # ── Stage 3 ──────────────────────────────────────────────────────────
+        for w in (self._eps_a_src_combo, self._eps_b_src_combo):
+            w.currentTextChanged.connect(self._mark_stale)
+        for w in (self._eps_a_irr_spin, self._eps_b_irr_spin):
+            w.valueChanged.connect(self._mark_stale)
+        for w in (self._eps_a_csv_edit, self._eps_a_col_edit,
+                  self._eps_b_csv_edit, self._eps_b_col_edit):
+            w.textChanged.connect(self._mark_stale)
+
     # ── Visibility toggles ────────────────────────────────────────────────────
 
     def _on_data_type_changed(self, text):
@@ -961,6 +1106,12 @@ class QuantumYieldTab(QWidget):
         self._flux_uw_grp.setVisible(text == "manual_uW")
         self._flux_actin_grp.setVisible(text == "actinometry")
         self._flux_led_grp.setVisible(text == "led_spectrum")
+        self._update_irr_wl_visibility()
+
+    def _update_irr_wl_visibility(self):
+        led_full = (self._flux_src_combo.currentText() == "led_spectrum"
+                    and self._led_integ_combo.currentText() == "full")
+        self._irr_wl_widget.setVisible(not led_full)
 
     def _on_baseline_changed(self, text):
         self._baseline_plat_grp.setVisible(text == "plateau")
@@ -980,6 +1131,9 @@ class QuantumYieldTab(QWidget):
     def _on_init_src_changed(self, text):
         self._init_manual_grp.setVisible(text == "manual")
 
+    def _on_slopes_toggled(self, checked: bool):
+        self._slopes_grp.setVisible(checked)
+
     def _on_eps_src_changed(self, which, text):
         if which == "A":
             self._eps_a_manual_grp.setVisible(text == "manual")
@@ -988,12 +1142,66 @@ class QuantumYieldTab(QWidget):
             self._eps_b_manual_grp.setVisible(text == "manual")
             self._eps_b_csv_grp.setVisible(text == "csv")
 
+    # ── LED diagnostic ────────────────────────────────────────────────────────
+
+    def _on_led_diag_toggled(self, checked: bool):
+        self._led_diag_spec_grp.setVisible(checked)
+        self._led_diag_plot.setVisible(checked)
+        if checked:
+            self._refresh_led_diag()
+
+    def _browse_init_spec(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Initial absorption spectrum CSV",
+            str(self._output_path or Path.home()),
+            "CSV files (*.csv);;All files (*)")
+        if p:
+            self._led_diag_spec_edit.setText(p)
+
+    def _load_init_spec(self):
+        """Return (wl_arr, abs_arr) from the uploaded CSV, or (None, None)."""
+        txt = self._led_diag_spec_edit.text().strip()
+        if not txt:
+            return None, None
+        p = Path(txt)
+        if not p.exists():
+            return None, None
+        try:
+            df = pd.read_csv(p, comment="#")
+            wl_col  = next((c for c in df.columns
+                            if "wave" in c.lower() or c.lower() == "nm"), None)
+            abs_col = next((c for c in df.columns
+                            if c.lower() not in ("wavelength_nm", "nm", "wavelength")
+                            and c.lower() != "index"), None)
+            if wl_col is None or abs_col is None:
+                return None, None
+            wl  = df[wl_col].values.astype(float)
+            ab  = df[abs_col].values.astype(float)
+            order = np.argsort(wl)
+            return wl[order], ab[order]
+        except Exception:
+            return None, None
+
+    def _refresh_led_diag(self):
+        """Re-render the LED diagnostic plot for the current result."""
+        if not self._led_diag_chk.isChecked() or not self._results:
+            return
+        r = self._results[self._current_idx]
+        wl, ab = self._load_init_spec()
+        fig = plot_qy_led_diagnostic(r, init_spec_wl=wl, init_spec_abs=ab)
+        self._led_diag_plot.set_figure(fig)
+        if self._output_path:
+            self._led_diag_plot.set_save_dir(
+                self._output_path / "quantum_yield" / "results" / "plots")
+        stem = Path(r.file_name).stem if r.file_name else f"qy_{self._current_idx}"
+        self._led_diag_plot.set_default_filename(f"{stem}_LED_diagnostic.png")
+
     # ── File selection ────────────────────────────────────────────────────────
 
     def _select_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Select QY data CSV files",
-            str(self._output_path or Path.home()),
+            str(self._raw_path or self._output_path or Path.home()),
             "CSV files (*.csv);;All files (*)")
         if not paths:
             return
@@ -1182,8 +1390,9 @@ class QuantumYieldTab(QWidget):
         p.QY_BA_init           = self._qy_ba_init_spin.value()
         p.QY_bounds_lo         = self._qy_lo_spin.value()
         p.QY_bounds_hi         = self._qy_hi_spin.value()
-        p.QY_unconstrained     = self._unconstrained_chk.isChecked()
-        p.n_initial_slopes_pts = self._n_slopes_spin.value()
+        p.QY_unconstrained       = self._unconstrained_chk.isChecked()
+        p.compute_initial_slopes = self._slopes_chk.isChecked()
+        p.n_initial_slopes_pts   = self._n_slopes_spin.value()
         ref_text = self._qy_ref_edit.text().strip()
         if ref_text:
             try:
@@ -1307,6 +1516,7 @@ class QuantumYieldTab(QWidget):
                 self._output_path / "quantum_yield" / "results" / "plots")
         stem = Path(r.file_name).stem if r.file_name else f"qy_{idx}"
         self._plot.set_default_filename(f"{stem}_QY.png")
+        self._refresh_led_diag()
 
     def _populate_table(self):
         self._table.setRowCount(0)
@@ -1330,7 +1540,6 @@ class QuantumYieldTab(QWidget):
     def _save_csv(self):
         if not self._results:
             return
-        import pandas as pd
         rows = []
         for r in self._results:
             for j, wl in enumerate(r.mon_wls):
@@ -1374,7 +1583,12 @@ class QuantumYieldTab(QWidget):
 
     def set_output_path(self, path: Path):
         self._output_path = path
-        self._plot.set_save_dir(path / "quantum_yield" / "results" / "plots")
+        plots_dir = path / "quantum_yield" / "results" / "plots"
+        self._plot.set_save_dir(plots_dir)
+        self._led_diag_plot.set_save_dir(plots_dir)
+
+    def set_raw_path(self, path: Path):
+        self._raw_path = path
 
     def apply_prefs(self, prefs):
         if not hasattr(prefs, "quantum_yield"):

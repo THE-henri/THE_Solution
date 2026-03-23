@@ -311,26 +311,42 @@ def run_fit_led(p_init, time_s, abs_exp,
 
 def initial_slopes_QY(time_s_ode, abs_data_fit, n_pts,
                       eps_A_irr_v, eps_A_mon_arr, eps_B_mon_arr,
-                      N_v, V_L_v, l_v, conc_A_0_v):
+                      N_v, V_L_v, l_v, conc_A_0_v,
+                      led_wl_arr=None, led_N_arr=None, led_eps_A_arr=None):
     """
     Estimate QY_AB from the initial slope at each monitoring wavelength.
     Returns (QY_estimates, slopes).
+
+    For LED full-integration mode, pass led_wl_arr/led_N_arr/led_eps_A_arr so
+    that the absorbed photon flux is integrated spectrally rather than
+    approximated from a single irradiation wavelength.
     """
-    A0_irr        = conc_A_0_v * eps_A_irr_v * l_v
-    absorbed_frac = ((1.0 - 10.0 ** (-A0_irr))
-                     if A0_irr > 1e-10 else A0_irr * np.log(10.0))
-    n    = min(n_pts, len(time_s_ode))
+    if (led_wl_arr is not None and led_N_arr is not None
+            and led_eps_A_arr is not None):
+        # Spectral absorbed flux: integrate N(λ) × (1 − 10^(−ε_A(λ)·c·l))
+        A0_led = led_eps_A_arr * conc_A_0_v * l_v
+        factor_arr = np.where(A0_led < 1e-10,
+                              A0_led * np.log(10.0),
+                              1.0 - 10.0 ** (-A0_led))
+        N_abs = float(np.trapezoid(led_N_arr * factor_arr, led_wl_arr))
+    else:
+        A0_irr = conc_A_0_v * eps_A_irr_v * l_v
+        absorbed_frac = ((1.0 - 10.0 ** (-A0_irr))
+                         if A0_irr > 1e-10 else A0_irr * np.log(10.0))
+        N_abs = N_v * absorbed_frac
+
+    n     = min(n_pts, len(time_s_ode))
     t_pts = time_s_ode[:n]
     QY_estimates, slopes = [], []
     for j in range(len(eps_A_mon_arr)):
         slope = np.polyfit(t_pts, abs_data_fit[:n, j], 1)[0]
         slopes.append(slope)
         eps_diff = float(eps_A_mon_arr[j]) - float(eps_B_mon_arr[j])
-        if abs(eps_diff) < 1.0 or absorbed_frac < 1e-12:
+        if abs(eps_diff) < 1.0 or N_abs < 1e-30:
             QY_estimates.append(np.nan)
         else:
             QY_estimates.append(
-                -slope * V_L_v / (eps_diff * l_v * N_v * absorbed_frac))
+                -slope * V_L_v / (eps_diff * l_v * N_abs))
     return QY_estimates, slopes
 
 
@@ -431,9 +447,10 @@ class QYParams:
     QY_BA_init:           float = 0.05
     QY_bounds_lo:         float = 1e-6
     QY_bounds_hi:         float = 1.0
-    QY_unconstrained:     bool  = False
-    QY_AB_reference:      Optional[float] = None
-    n_initial_slopes_pts: int   = 8
+    QY_unconstrained:       bool  = False
+    QY_AB_reference:        Optional[float] = None
+    compute_initial_slopes: bool  = True
+    n_initial_slopes_pts:   int   = 8
 
 
 # ── Result container ─────────────────────────────────────────────────────────
@@ -485,6 +502,10 @@ class QYFileResult:
     QY_slopes_raw:            list[float]    # raw Δabs/Δt slopes per monitoring λ
     n_initial_slopes_pts:     int
     irradiation_wavelength_nm: float
+    # LED diagnostic arrays (set only when photon_flux_source == "led_spectrum")
+    led_wl_arr:    Optional[np.ndarray] = field(default=None)
+    led_N_arr:     Optional[np.ndarray] = field(default=None)
+    led_eps_A_arr: Optional[np.ndarray] = field(default=None)
 
 
 # ── Photon flux loading ───────────────────────────────────────────────────────
@@ -1053,10 +1074,15 @@ def run_qy_file(
     method = ("ODE_lmfit_LED_full" if use_led_full else "ODE_lmfit")
 
     # ── Initial slopes ────────────────────────────────────────────────────────
-    QY_slopes, slopes_raw = initial_slopes_QY(
-        time_s_ode, abs_data_fit, params.n_initial_slopes_pts,
-        eps_A_irr, eps_A_mon, eps_B_mon,
-        N_mol_s, V_L, params.path_length_cm, conc_A_0)
+    if params.compute_initial_slopes:
+        QY_slopes, slopes_raw = initial_slopes_QY(
+            time_s_ode, abs_data_fit, params.n_initial_slopes_pts,
+            eps_A_irr, eps_A_mon, eps_B_mon,
+            N_mol_s, V_L, params.path_length_cm, conc_A_0,
+            *(( led_wl_arr, led_N_arr, led_eps_A_arr) if use_led_full else (None, None, None)))
+    else:
+        QY_slopes  = [np.nan] * n_mon
+        slopes_raw = [np.nan] * n_mon
 
     # ── Build display curves ──────────────────────────────────────────────────
     disp_mask = time_s >= time_s_fit[0]
@@ -1143,6 +1169,9 @@ def run_qy_file(
         QY_slopes_raw=slopes_raw,
         n_initial_slopes_pts=params.n_initial_slopes_pts,
         irradiation_wavelength_nm=params.irradiation_wavelength_nm,
+        led_wl_arr=led_wl_arr if led_wl_arr is not None else None,
+        led_N_arr=led_N_arr if led_N_arr is not None else None,
+        led_eps_A_arr=led_eps_A_arr if use_led_full else None,
     )
 
 
@@ -1227,7 +1256,8 @@ def plot_qy_result(result: QYFileResult) -> Figure:
     axes[0].text(0.97, 0.97, "\n".join(lines),
                  transform=axes[0].transAxes, fontsize=8,
                  verticalalignment="top", horizontalalignment="right",
-                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
+                 zorder=6,
+                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.95))
     axes[0].set_title(
         f"{result.compound}  |  {result.case}  |  {result.file_name}")
 
@@ -1258,4 +1288,148 @@ def plot_qy_result(result: QYFileResult) -> Figure:
     ax_conc.legend(fontsize=8)
     ax_conc.grid(True, alpha=0.4)
 
+    return fig
+
+
+def plot_qy_led_diagnostic(
+    result: QYFileResult,
+    init_spec_wl:  Optional[np.ndarray] = None,
+    init_spec_abs: Optional[np.ndarray] = None,
+) -> Figure:
+    """
+    Two-panel diagnostic figure for LED full-integration mode.
+
+    Left  — spectral overlap: N(λ) [left y-axis] with ε_A(λ) or A(λ)
+             [right y-axis], monitoring wavelengths marked.
+    Right — absorbed-photon weighting: N(λ)·(1−10^(−ε_A·c₀·l)) when
+             ε_A(λ) is available, otherwise normalised N(λ)·A(λ) overlap.
+
+    Parameters
+    ----------
+    result        : QYFileResult from run_qy_file.
+    init_spec_wl  : Optional wavelength array for an externally supplied
+                    initial absorbance spectrum.
+    init_spec_abs : Optional absorbance array matching init_spec_wl.
+    """
+    led_wl  = result.led_wl_arr
+    led_N   = result.led_N_arr
+    eps_A   = result.led_eps_A_arr   # None in scalar mode or when ε is manual
+
+    if led_wl is None or led_N is None:
+        fig = Figure(figsize=(6, 3))
+        ax  = fig.add_subplot(111)
+        ax.text(0.5, 0.5,
+                "No LED spectrum available.\n"
+                "Select 'led_spectrum' as photon flux source and re-run.",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color="#888")
+        ax.set_axis_off()
+        return fig
+
+    fig = Figure(figsize=(11, 4.5), constrained_layout=True)
+    ax_l, ax_r = fig.subplots(1, 2)
+
+    # ── Left panel: spectral overlap ─────────────────────────────────────────
+    N_pm = led_N * 1e12      # mol/s/nm → pmol/s/nm for readability
+    ax_l.fill_between(led_wl, N_pm, alpha=0.20, color="#3cb371")
+    ax_l.plot(led_wl, N_pm, color="#3cb371", linewidth=1.8, label="N(λ)")
+    ax_l.set_xlabel("Wavelength (nm)")
+    ax_l.set_ylabel("N(λ)  (pmol s⁻¹ nm⁻¹)", color="#3cb371")
+    ax_l.tick_params(axis="y", labelcolor="#3cb371")
+
+    ax_l2 = ax_l.twinx()
+    have_spec = False
+
+    if eps_A is not None:
+        ax_l2.plot(led_wl, eps_A, color="#4a7fd4", linewidth=1.8,
+                   linestyle="--", label="ε_A(λ)")
+        ax_l2.set_ylabel("ε_A(λ)  (M⁻¹ cm⁻¹)", color="#4a7fd4")
+        ax_l2.tick_params(axis="y", labelcolor="#4a7fd4")
+        have_spec = True
+    elif init_spec_wl is not None and init_spec_abs is not None:
+        ax_l2.plot(init_spec_wl, init_spec_abs, color="#4a7fd4", linewidth=1.8,
+                   linestyle="--", label="A(λ) at t₀")
+        ax_l2.set_ylabel("A(λ) at t₀", color="#4a7fd4")
+        ax_l2.tick_params(axis="y", labelcolor="#4a7fd4")
+        have_spec = True
+    else:
+        ax_l2.set_yticks([])
+        ax_l2.text(0.97, 0.05,
+                   "Upload an initial spectrum\nto see the absorption overlay.",
+                   transform=ax_l2.transAxes, fontsize=8, color="#888",
+                   va="bottom", ha="right")
+
+    for wl in result.mon_wls:
+        ax_l.axvline(wl, color="#e87040", linewidth=1.2, linestyle=":",
+                     label="mon λ" if wl == result.mon_wls[0] else None)
+
+    lines_l, lbl_l = ax_l.get_legend_handles_labels()
+    lines_r, lbl_r = ax_l2.get_legend_handles_labels()
+    ax_l.legend(lines_l + lines_r, lbl_l + lbl_r, fontsize=8, loc="upper left")
+    ax_l.set_title("Spectral overlap: LED emission vs. absorption")
+    ax_l.grid(True, alpha=0.35)
+
+    # ── Right panel: absorbed-photon weighting ────────────────────────────────
+    ax_r.set_xlabel("Wavelength (nm)")
+    ax_r.grid(True, alpha=0.35)
+
+    if eps_A is not None:
+        # Exact spectral absorbed flux
+        A0_arr  = eps_A * result.conc_A_0 * result.path_length_cm
+        fac_arr = np.where(A0_arr < 1e-10,
+                           A0_arr * np.log(10.0),
+                           1.0 - 10.0 ** (-A0_arr))
+        absorbed = led_N * fac_arr * 1e12   # pmol/s/nm
+        ax_r.fill_between(led_wl, absorbed, alpha=0.25, color="#c0392b")
+        ax_r.plot(led_wl, absorbed, color="#c0392b", linewidth=1.8,
+                  label="N(λ)·(1−10^(−ε_A·c₀·l))")
+        ax_r.set_ylabel("Absorbed photon flux  (pmol s⁻¹ nm⁻¹)", color="#c0392b")
+        ax_r.tick_params(axis="y", labelcolor="#c0392b")
+        for wl in result.mon_wls:
+            ax_r.axvline(wl, color="#e87040", linewidth=1.2, linestyle=":",
+                         label="mon λ" if wl == result.mon_wls[0] else None)
+        N_abs = float(np.trapezoid(led_N * fac_arr, led_wl))
+        frac  = N_abs / result.N_mol_s if result.N_mol_s > 0 else float("nan")
+        ax_r.text(0.97, 0.97,
+                  f"N_abs  = {N_abs:.4e} mol s⁻¹\n"
+                  f"N_total = {result.N_mol_s:.4e} mol s⁻¹\n"
+                  f"Absorbed fraction = {frac:.3f}",
+                  transform=ax_r.transAxes, fontsize=8,
+                  va="top", ha="right",
+                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
+        ax_r.legend(fontsize=8)
+        ax_r.set_title("Spectral absorbed photon flux at t₀")
+
+    elif init_spec_wl is not None and init_spec_abs is not None:
+        # Normalised overlap: N(λ) · A(λ)
+        N_n = led_N / np.max(led_N) if np.max(led_N) > 0 else led_N
+        A_i = np.interp(led_wl, init_spec_wl, init_spec_abs, left=0.0, right=0.0)
+        A_n = A_i / np.max(A_i) if np.max(A_i) > 0 else A_i
+        overlap = N_n * A_n
+        ax_r.fill_between(led_wl, overlap, alpha=0.25, color="#c0392b")
+        ax_r.plot(led_wl, overlap, color="#c0392b", linewidth=1.8,
+                  label="N(λ)·A(λ)  [norm.]")
+        ax_r.plot(led_wl, N_n, color="#3cb371", linewidth=1.2,
+                  linestyle="--", label="N(λ) norm.")
+        ax_r.plot(led_wl, A_n, color="#4a7fd4", linewidth=1.2,
+                  linestyle="--", label="A(λ) norm.")
+        for wl in result.mon_wls:
+            ax_r.axvline(wl, color="#e87040", linewidth=1.2, linestyle=":",
+                         label="mon λ" if wl == result.mon_wls[0] else None)
+        ax_r.set_ylabel("Normalised intensity")
+        ax_r.legend(fontsize=8)
+        ax_r.set_title("Spectral overlap (normalised, no ε_A CSV)")
+
+    else:
+        ax_r.text(0.5, 0.5,
+                  "Upload an initial absorption spectrum\n"
+                  "or provide ε_A via CSV in Stage 3\n"
+                  "to see the spectral weighting.",
+                  ha="center", va="center", transform=ax_r.transAxes,
+                  fontsize=10, color="#888")
+        ax_r.set_axis_off()
+
+    fig.suptitle(
+        f"LED Spectral Diagnostic — {result.compound}  |  {result.file_name}",
+        fontsize=10)
     return fig
