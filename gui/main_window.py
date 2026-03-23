@@ -13,6 +13,7 @@ from gui.tabs.extinction_coeff_tab import ExtinctionCoeffTab
 from gui.tabs.spectra_tab import SpectraTab
 from gui.tabs.qy_tab import QuantumYieldTab
 from gui.tabs.placeholder_tab import PlaceholderTab
+from gui.tabs.handbook_tab import HandbookTab
 from gui.project_prefs import ProjectPrefs
 
 
@@ -57,7 +58,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._actinometer_tab,                  "Actinometer")
         self._tabs.addTab(self._qy_tab,                           "Quantum Yield")
         self._tabs.addTab(PlaceholderTab("Parameters"),           "Parameters")
-        self._tabs.addTab(PlaceholderTab("Handbook"),             "Handbook")
+        self._tabs.addTab(HandbookTab(),                          "Handbook")
 
         splitter.addWidget(self._tabs)
 
