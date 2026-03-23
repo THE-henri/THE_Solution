@@ -35,7 +35,9 @@ class ExtinctionCoeffTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._output_path: Optional[Path] = None
+        self._output_path:  Optional[Path] = None
+        self._raw_path:     Optional[Path] = None
+        self._compound_name: str = ""
         self._df_result: Optional[pd.DataFrame] = None
         self._worker: Optional[Worker] = None
         self._build_ui()
@@ -122,14 +124,6 @@ class ExtinctionCoeffTab(QWidget):
         )
 
         row1 = QHBoxLayout()
-        self._compound_edit = self._text_field(
-            row1, "Compound name", "", pref=True,
-            info_title="Compound name",
-            info_text=(
-                "Stored in the output CSV — used for plot titles and file naming.\n"
-                "Does not affect any calculation."
-            ),
-        )
         self._solvent_edit = self._text_field(
             row1, "Solvent", "acetonitrile", pref=True,
             info_title="Solvent",
@@ -165,7 +159,6 @@ class ExtinctionCoeffTab(QWidget):
         self._stage2.add_layout(row2)
 
         for sig in (
-            self._compound_edit.textChanged,
             self._solvent_edit.textChanged,
             self._path_length_spin.valueChanged,
             self._temperature_spin.valueChanged,
@@ -277,10 +270,16 @@ class ExtinctionCoeffTab(QWidget):
         plots_dir = path / "extinction_coefficients" / "results" / "plots"
         self._plot.set_save_dir(plots_dir)
 
+    def set_raw_path(self, path: Path):
+        self._raw_path = path
+
+    def set_compound_name(self, name: str):
+        self._compound_name = name
+
     # ── Table management ──────────────────────────────────────────────────
 
     def _select_files(self):
-        start = str(self._output_path or Path.home())
+        start = str(self._raw_path or self._output_path or Path.home())
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Select UV-Vis CSV files", start, "CSV files (*.csv)")
         existing = self._table_paths()
@@ -388,7 +387,7 @@ class ExtinctionCoeffTab(QWidget):
             self._status_lbl.setText("No files to process.")
             return
 
-        compound = self._compound_edit.text().strip() or "Unknown"
+        compound = self._compound_name or "Unknown"
         path_len = self._path_length_spin.value()
         solvent  = self._solvent_edit.text().strip() or "unknown"
         temp_c   = self._temperature_spin.value()
@@ -415,7 +414,7 @@ class ExtinctionCoeffTab(QWidget):
     def _on_result(self, df: pd.DataFrame):
         self._df_result = df
         fig, _ = plot_extinction_coefficients(df, show=False)
-        compound = self._compound_edit.text().strip() or "compound"
+        compound = self._compound_name or "compound"
         temp_c   = int(self._temperature_spin.value())
         self._plot.set_default_filename(f"{compound}_EC_{temp_c}C.png")
         self._plot.set_figure(fig)
@@ -440,7 +439,7 @@ class ExtinctionCoeffTab(QWidget):
     def _save_csv(self):
         if self._df_result is None:
             return
-        compound = self._compound_edit.text().strip() or "compound"
+        compound = self._compound_name or "compound"
         temp_c   = int(self._temperature_spin.value())
         ts = self._df_result["Date"].iloc[0].replace(":", "-").replace(" ", "_")
         default_name = f"{compound}_EC_{temp_c}C_{ts}.csv"
@@ -462,17 +461,14 @@ class ExtinctionCoeffTab(QWidget):
 
     def apply_prefs(self, prefs):
         ec = prefs.extinction_coeff
-        self._compound_edit.blockSignals(True)
         self._solvent_edit.blockSignals(True)
-        self._compound_edit.setText(ec.compound_name)
         self._solvent_edit.setText(ec.solvent)
-        self._compound_edit.blockSignals(False)
         self._solvent_edit.blockSignals(False)
         self._path_length_spin.setValue(ec.path_length_cm)
         self._temperature_spin.setValue(ec.temperature_c)
 
     def collect_prefs(self, prefs):
-        prefs.extinction_coeff.compound_name  = self._compound_edit.text()
+        prefs.extinction_coeff.compound_name  = self._compound_name
         prefs.extinction_coeff.path_length_cm = self._path_length_spin.value()
         prefs.extinction_coeff.solvent        = self._solvent_edit.text()
         prefs.extinction_coeff.temperature_c  = self._temperature_spin.value()
