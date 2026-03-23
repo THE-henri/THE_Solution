@@ -141,7 +141,7 @@ class MasterCsvTable(QWidget):
 
         if self._output_path is None:
             return
-        csv = self._output_path / "data" / "half_life" / "results" / "half_life_master.csv"
+        csv = self._output_path / "half_life" / "results" / "half_life_master.csv"
         if not csv.exists():
             self._set_status("No master CSV found yet.", ok=None)
             return
@@ -155,24 +155,30 @@ class MasterCsvTable(QWidget):
         except Exception as exc:
             self._set_status(f"Error reading CSV: {exc}", ok=False)
 
-    def add_pending(self, result_dict: dict):
+    def add_pending(self, result_dicts):
         """
-        Add a new result row (blue, not yet appended).
+        Add one or more new result rows (blue, not yet appended).
 
-        Any previously pending (blue) rows are discarded first, so
-        re-running a calculation always shows only the latest results.
+        Accepts either a single dict or a list of dicts.  Any previously
+        pending (blue) rows are discarded first, so re-running a calculation
+        always shows only the latest results.
         """
+        if isinstance(result_dicts, dict):
+            result_dicts = [result_dicts]
+
         # Normalise key: scanning kinetics uses "Wavelength_nm"
-        if "Wavelength_nm" in result_dict and "Wavelength" not in result_dict:
-            result_dict["Wavelength"] = result_dict.pop("Wavelength_nm")
+        for d in result_dicts:
+            if "Wavelength_nm" in d and "Wavelength" not in d:
+                d["Wavelength"] = d.pop("Wavelength_nm")
 
         # Remove stale pending rows from the table
         while self._table.rowCount() > self._n_committed:
             self._table.removeRow(self._table.rowCount() - 1)
         self._pending.clear()
 
-        self._pending.append(result_dict)
-        self._add_row(result_dict, _BG_PENDING, _FG_PENDING)
+        for d in result_dicts:
+            self._pending.append(d)
+            self._add_row(d, _BG_PENDING, _FG_PENDING)
         self._btn_append.setEnabled(True)
         self._set_status(
             f"{len(self._pending)} new result(s) pending — click Append to commit.",
@@ -192,7 +198,7 @@ class MasterCsvTable(QWidget):
         df["Temperature_C"] = pd.to_numeric(df["Temperature_C"], errors="coerce")
         df = df.sort_values("Temperature_C", ignore_index=True)
 
-        out_dir = self._output_path / "data" / "half_life" / "results"
+        out_dir = self._output_path / "half_life" / "results"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "half_life_master.csv"
         df.to_csv(out_path, index=False)

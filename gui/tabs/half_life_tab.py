@@ -665,6 +665,7 @@ class KineticsPanel(QWidget):
                 item.widget().deleteLater()
 
         file_stem = Path(self._k_file_edit.text()).stem
+        result_entries = []
 
         for r in results:
             if not r.success:
@@ -710,7 +711,7 @@ class KineticsPanel(QWidget):
             # Add result to master table
             switch_val = r.switch
             popt = r.popt
-            result_entry = {
+            result_entries.append({
                 "File":          Path(self._k_file_edit.text()).name,
                 "Wavelength":    r.label,
                 "Type":          "Kinetics",
@@ -721,8 +722,10 @@ class KineticsPanel(QWidget):
                 "k":             popt[-1] if popt is not None else None,
                 "Half_life_s":   r.t_half,
                 "R2":            r.r2,
-            }
-            self._k_master.add_pending(result_entry)
+            })
+
+        if result_entries:
+            self._k_master.add_pending(result_entries)
 
     @pyqtSlot(str)
     def _k_on_fit_error(self, msg: str):
@@ -873,6 +876,8 @@ class ScanningKineticsPanel(QWidget):
         int_row.addWidget(self._sk_unit_min)
         int_row.addStretch()
         card.add_layout(int_row)
+        self._sk_interval.valueChanged.connect(self._sk_mark_stale)
+        self._sk_unit_min.toggled.connect(self._sk_mark_stale)
 
         self._sk_scan_count_lbl = QLabel("")
         self._sk_scan_count_lbl.setObjectName("detected_label")
@@ -935,6 +940,7 @@ class ScanningKineticsPanel(QWidget):
         tol_row.addWidget(self._sk_tol)
         tol_row.addStretch()
         card.add_layout(tol_row)
+        self._sk_tol.valueChanged.connect(self._sk_mark_stale)
 
         return card
 
@@ -948,6 +954,7 @@ class ScanningKineticsPanel(QWidget):
         sb.setValue(default_nm)
         sb.setSuffix(" nm")
         sb.setFixedWidth(100)
+        sb.valueChanged.connect(self._sk_mark_stale)
         self._wavelength_inputs.append(sb)
         row_l.addWidget(sb)
         btn_del = QPushButton("✕")
@@ -1002,6 +1009,10 @@ class ScanningKineticsPanel(QWidget):
 
         self._sk_ref_fixed.toggled.connect(
             lambda on: self._sk_ref_ainf_val.setEnabled(on))
+        self._sk_ref_file.toggled.connect(self._sk_mark_stale)
+        self._sk_ref_fixed.toggled.connect(self._sk_mark_stale)
+        self._sk_ref_free.toggled.connect(self._sk_mark_stale)
+        self._sk_ref_ainf_val.valueChanged.connect(self._sk_mark_stale)
 
         # Reference file picker (only shown when "Use reference file" selected)
         self._sk_ref_file_row = QWidget()
@@ -1033,6 +1044,7 @@ class ScanningKineticsPanel(QWidget):
             self._ref_scans = load_reference_spectrum(path)
             print(f"Reference spectrum loaded: {Path(path).name} "
                   f"({len(self._ref_scans)} scan(s))")
+            self._sk_mark_stale()
         except Exception as exc:
             self._sk_ref_path_edit.setText(f"Error: {exc}")
 
@@ -1316,6 +1328,7 @@ class ScanningKineticsPanel(QWidget):
                 item.widget().deleteLater()
 
         file_stem = Path(self._sk_file_edit.text()).stem
+        result_entries = []
 
         for r in results:
             if not r.success:
@@ -1350,7 +1363,7 @@ class ScanningKineticsPanel(QWidget):
             plt.close(fig)
             self._sk_plot_layout.addWidget(pw)
 
-            result_entry = {
+            result_entries.append({
                 "File":          Path(self._sk_file_edit.text()).name,
                 "Wavelength":    r.label,
                 "Type":          "Scanning Kinetics",
@@ -1361,8 +1374,10 @@ class ScanningKineticsPanel(QWidget):
                 "k":             r.popt[-1] if r.popt is not None else None,
                 "Half_life_s":   r.t_half,
                 "R2":            r.r2,
-            }
-            self._sk_master.add_pending(result_entry)
+            })
+
+        if result_entries:
+            self._sk_master.add_pending(result_entries)
 
     @pyqtSlot(str)
     def _sk_on_fit_error(self, msg: str):
