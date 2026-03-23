@@ -24,9 +24,13 @@ _FLOAT_COLS = {"A0", "A_inf", "k", "Half_life_s", "R2"}
 _FLOAT_FMT  = {"A0": ".4f", "A_inf": ".4f", "k": ".6f",
                "Half_life_s": ".2f", "R2": ".6f"}
 
-_BG_LOADED  = QColor("#1e1e2e")   # existing rows (from CSV)
-_BG_PENDING = QColor("#0d3050")   # new results not yet appended
-_BG_APPENDED = QColor("#1a3520")  # appended but not yet saved
+_BG_LOADED   = QColor("#1e1e2e")   # existing rows (from CSV)
+_BG_PENDING  = QColor("#0d3050")   # new results not yet appended
+_BG_APPENDED = QColor("#1a3520")   # appended but not yet saved
+
+_FG_LOADED   = QColor("#ffffff")
+_FG_PENDING  = QColor("#ff4444")   # red  — not yet committed
+_FG_APPENDED = QColor("#44ff88")   # green — committed, pending save
 
 
 def _fmt(col: str, val) -> str:
@@ -145,7 +149,7 @@ class MasterCsvTable(QWidget):
             df = pd.read_csv(csv)
             df = df.sort_values("Temperature_C", ignore_index=True)
             for _, row in df.iterrows():
-                self._add_row({c: row.get(c, "") for c in COLUMNS}, _BG_LOADED)
+                self._add_row({c: row.get(c, "") for c in COLUMNS}, _BG_LOADED, _FG_LOADED)
             self._n_committed = self._table.rowCount()
             self._set_status(f"Loaded {len(df)} rows.", ok=True)
         except Exception as exc:
@@ -168,7 +172,7 @@ class MasterCsvTable(QWidget):
         self._pending.clear()
 
         self._pending.append(result_dict)
-        self._add_row(result_dict, _BG_PENDING)
+        self._add_row(result_dict, _BG_PENDING, _FG_PENDING)
         self._btn_append.setEnabled(True)
         self._set_status(
             f"{len(self._pending)} new result(s) pending — click Append to commit.",
@@ -205,7 +209,7 @@ class MasterCsvTable(QWidget):
         start = self._n_committed
         end   = self._table.rowCount()
         for r in range(start, end):
-            self._set_row_color(r, _BG_APPENDED)
+            self._set_row_color(r, _BG_APPENDED, _FG_APPENDED)
         self._n_committed = end
         self._pending.clear()
         self._btn_append.setEnabled(False)
@@ -213,13 +217,14 @@ class MasterCsvTable(QWidget):
             f"{n_pending} result(s) appended. Click Save to write to disk.",
             ok=None)
 
-    def _add_row(self, data: dict, bg: QColor):
+    def _add_row(self, data: dict, bg: QColor, fg: QColor):
         r = self._table.rowCount()
         self._table.insertRow(r)
         for c, col in enumerate(COLUMNS):
             item = QTableWidgetItem(_fmt(col, data.get(col, "")))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setBackground(bg)
+            item.setForeground(fg)
             self._table.setItem(r, c, item)
         # Delete button
         btn = QPushButton("✕")
@@ -227,11 +232,12 @@ class MasterCsvTable(QWidget):
         btn.clicked.connect(lambda _, row=r: self._delete_row(row))
         self._table.setCellWidget(r, len(COLUMNS), btn)
 
-    def _set_row_color(self, row: int, bg: QColor):
+    def _set_row_color(self, row: int, bg: QColor, fg: QColor):
         for c in range(len(COLUMNS)):
             item = self._table.item(row, c)
             if item:
                 item.setBackground(bg)
+                item.setForeground(fg)
 
     def _delete_row(self, row: int):
         # Adjust committed count if a committed row is deleted

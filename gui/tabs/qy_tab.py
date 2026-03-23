@@ -202,6 +202,14 @@ class QuantumYieldTab(QWidget):
         sep.setStyleSheet("color:#555;")
         self._stage1.add_widget(sep)
 
+        self._irr_wl_spin = QDoubleSpinBox()
+        self._irr_wl_spin.setRange(200, 1100)
+        self._irr_wl_spin.setDecimals(1)
+        self._irr_wl_spin.setValue(530.0)
+        self._irr_wl_spin.setSuffix(" nm")
+        self._stage1.add_layout(_field_row(
+            "Irradiation λ:", self._irr_wl_spin, 120, pref=True))
+
         self._flux_src_combo = QComboBox()
         self._flux_src_combo.addItems([
             "manual_mol_s", "manual_uW", "actinometry", "led_spectrum"])
@@ -235,12 +243,6 @@ class QuantumYieldTab(QWidget):
         self._flux_uw_spin.setValue(0.0)
         self._flux_uw_spin.setSuffix(" µW")
         ug.addLayout(_field_row("Power:", self._flux_uw_spin, 120))
-        self._irr_wl_spin = QDoubleSpinBox()
-        self._irr_wl_spin.setRange(200, 1100)
-        self._irr_wl_spin.setDecimals(1)
-        self._irr_wl_spin.setValue(530.0)
-        self._irr_wl_spin.setSuffix(" nm")
-        ug.addLayout(_field_row("Irradiation λ:", self._irr_wl_spin, 120, pref=True))
         self._flux_uw_std_spin = QDoubleSpinBox()
         self._flux_uw_std_spin.setRange(0, 1)
         self._flux_uw_std_spin.setDecimals(6)
@@ -262,7 +264,7 @@ class QuantumYieldTab(QWidget):
         self._actin_filter_spin.setRange(0, 1100)
         self._actin_filter_spin.setDecimals(1)
         self._actin_filter_spin.setValue(0.0)
-        self._actin_filter_spin.setSpecialValueText("(last row)")
+        self._actin_filter_spin.setSpecialValueText("(auto from irr λ)")
         ag.addLayout(_field_row("Filter λ (nm):", self._actin_filter_spin, 100))
         self._stage1.add_widget(self._flux_actin_grp)
 
@@ -307,10 +309,6 @@ class QuantumYieldTab(QWidget):
         self._case_combo = QComboBox()
         self._case_combo.addItems(["A_only", "AB_both", "A_thermal_PSS"])
         self._stage2.add_layout(_field_row("Case:", self._case_combo, 140, pref=True))
-
-        self._compound_edit = QLineEdit()
-        self._compound_edit.setPlaceholderText("e.g. DMSO-DAE")
-        self._stage2.add_layout(_field_row("Compound name:", self._compound_edit, 200, pref=True))
 
         self._temp_spin = QDoubleSpinBox()
         self._temp_spin.setRange(-100, 200)
@@ -357,10 +355,10 @@ class QuantumYieldTab(QWidget):
         self._baseline_combo = QComboBox()
         self._baseline_combo.addItems(["first_point", "none", "plateau", "file"])
         self._stage2.add_layout(
-            _field_row("Baseline correction:", self._baseline_combo, 120))
+            _field_row("Offset correction:", self._baseline_combo, 120))
         self._baseline_combo.currentTextChanged.connect(self._on_baseline_changed)
 
-        self._baseline_plat_grp = QGroupBox("Plateau baseline")
+        self._baseline_plat_grp = QGroupBox("Plateau offset")
         bpg = QVBoxLayout(self._baseline_plat_grp)
         self._plat_dur_spin = QDoubleSpinBox()
         self._plat_dur_spin.setRange(0, 1e5)
@@ -383,7 +381,7 @@ class QuantumYieldTab(QWidget):
         self._stage2.add_widget(self._baseline_plat_grp)
         self._baseline_plat_grp.setVisible(False)
 
-        self._baseline_file_grp = QGroupBox("Baseline file")
+        self._baseline_file_grp = QGroupBox("Offset file")
         bfg = QVBoxLayout(self._baseline_file_grp)
         self._baseline_file_edit = QLineEdit()
         self._baseline_file_edit.setPlaceholderText("baseline CSV …")
@@ -867,20 +865,21 @@ class QuantumYieldTab(QWidget):
             p.scans_per_group = self._scans_per_grp_spin.value()
             p.first_cycle_off = self._first_cycle_off_chk.isChecked()
 
+        p.irradiation_wavelength_nm = self._irr_wl_spin.value()
+
         src = self._flux_src_combo.currentText()
         p.photon_flux_source = src
         if src == "manual_mol_s":
             p.photon_flux_mol_s     = self._flux_mol_s_spin.value()
             p.photon_flux_std_mol_s = self._flux_std_spin.value()
         elif src == "manual_uW":
-            p.photon_flux_uW            = self._flux_uw_spin.value()
-            p.irradiation_wavelength_nm = self._irr_wl_spin.value()
-            p.photon_flux_std_mol_s     = self._flux_uw_std_spin.value()
+            p.photon_flux_uW        = self._flux_uw_spin.value()
+            p.photon_flux_std_mol_s = self._flux_uw_std_spin.value()
         elif src == "actinometry":
             txt = self._actin_csv_edit.text().strip()
             p.actinometry_csv = Path(txt) if txt else None
             v = self._actin_filter_spin.value()
-            p.actinometry_filter_nm = v if v > 0 else None
+            p.actinometry_filter_nm = v if v > 0 else p.irradiation_wavelength_nm
         elif src == "led_spectrum":
             txt = self._led_csv_edit.text().strip()
             p.led_spectrum_csv    = Path(txt) if txt else None
@@ -888,7 +887,6 @@ class QuantumYieldTab(QWidget):
 
         # Stage 2 — experiment
         p.case          = self._case_combo.currentText()
-        p.compound_name = self._compound_edit.text().strip()
         p.temperature_C = self._temp_spin.value()
         p.solvent       = self._solvent_edit.text().strip()
         p.path_length_cm = self._path_spin.value()
@@ -1163,7 +1161,6 @@ class QuantumYieldTab(QWidget):
             return
         qp = prefs.quantum_yield
         self._case_combo.setCurrentText(qp.case)
-        self._compound_edit.setText(qp.compound_name)
         self._temp_spin.setValue(qp.temperature_C)
         self._solvent_edit.setText(qp.solvent)
         self._path_spin.setValue(qp.path_length_cm)
@@ -1193,7 +1190,6 @@ class QuantumYieldTab(QWidget):
             return
         qp = prefs.quantum_yield
         qp.case                    = self._case_combo.currentText()
-        qp.compound_name           = self._compound_edit.text().strip()
         qp.temperature_C           = self._temp_spin.value()
         qp.solvent                 = self._solvent_edit.text().strip()
         qp.path_length_cm          = self._path_spin.value()

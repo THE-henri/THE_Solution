@@ -19,6 +19,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
 import matplotlib.colors as mcolors
+from matplotlib.figure import Figure
 
 
 # ── CSV loading ───────────────────────────────────────────────────────────────
@@ -179,6 +180,9 @@ class SpectraParams:
     pss_fraction_B_error:   float = 0.02
     # spectrum selection (None = all, tuple (start,stop), or list)
     spectrum_indices:       object = None
+    # diagnostics
+    show_diagnostics:       bool   = False
+    convergence_fractions:  list   = field(default_factory=lambda: [0.25, 0.5, 0.75, 1.0])
 
 
 @dataclass
@@ -202,6 +206,55 @@ class SpectraResult:
     meta_lines:      list[str]              = field(default_factory=list)
     # series data for plots
     series_used:     Optional[np.ndarray]   = None
+    # diagnostic data (only populated when SpectraParams.show_diagnostics=True)
+    B_estimates:             Optional[np.ndarray] = None   # (n, wl) negative mode
+    pca_scores:              Optional[np.ndarray] = None   # (n,)
+    pca_corr_sa:             Optional[float]      = None
+    alpha_min_pca:           Optional[float]      = None
+    boot_SB_arr:             Optional[np.ndarray] = None   # (n_boot, wl)
+    boot_scales_arr:         Optional[np.ndarray] = None   # (n_boot,)
+    most_converted_spectrum: Optional[np.ndarray] = None   # (wl,)
+    convergence_results:     Optional[list]       = None   # [(frac, n, SB, amin), ...]
+
+
+# ── Diagnostic helpers ────────────────────────────────────────────────────────
+
+def _run_neg_subset(sub, S_A, ref_indices, weighted, sb_tolerance):
+    """Negative-mode extraction on a spectrum subset. Returns (S_B, alpha_min) or None."""
+    B_list, a_list = [], []
+    for sp in sub:
+        a = compute_alpha(sp, S_A, ref_indices, weighted)
+        if np.isnan(a) or a <= 0 or a >= 1:
+            continue
+        B_i = (sp - a * S_A) / (1.0 - a)
+        if np.any(B_i < -sb_tolerance):
+            continue
+        B_list.append(B_i)
+        a_list.append(a)
+    if len(B_list) < 2:
+        return None
+    return np.array(B_list).mean(axis=0), float(min(a_list))
+
+
+def _run_pca_subset(sub, S_A, sb_tolerance):
+    """PCA extraction on a spectrum subset. Returns (S_B, alpha_min, scale) or None."""
+    if len(sub) < 3:
+        return None
+    D = sub - S_A
+    _, sv, Vt = np.linalg.svd(D, full_matrices=False)
+    pc1 = Vt[0]
+    scores_s = D @ pc1
+    if scores_s[-1] < scores_s[0]:
+        pc1 = -pc1
+        scores_s = -scores_s
+    neg_mask = (pc1 < 0) & (S_A + sb_tolerance > 0)
+    sc_nn = float(np.min((S_A[neg_mask] + sb_tolerance) / (-pc1[neg_mask]))) \
+        if neg_mask.any() else np.inf
+    sc_lower = float(scores_s.max())
+    sc = sc_nn if sc_nn >= sc_lower else sc_lower
+    SB_s = S_A + sc * pc1
+    alpha_min_s = float(1.0 - sc_lower / sc) if sc > 0 else np.nan
+    return SB_s, alpha_min_s, sc
 
 
 # ── Main extraction ───────────────────────────────────────────────────────────
@@ -271,6 +324,15 @@ def run_spectra_extraction(
     scale = var_explained = None
     n_boot_rejected = 0
     series_used = series[selected_idx]
+    # diagnostic accumulators (None unless show_diagnostics=True and mode supports it)
+    _diag_B_estimates   = None
+    _diag_most_conv     = None
+    _diag_pca_scores    = None
+    _diag_pca_corr_sa   = None
+    _diag_alpha_min_pca = None
+    _diag_boot_SB_arr   = None
+    _diag_boot_sc_arr   = None
+    _convergence_results = None
 
     # ── NEGATIVE ─────────────────────────────────────────────────────────────
     if mode == "negative":
@@ -324,6 +386,9 @@ def run_spectra_extraction(
         alphas   = np.array(alphas_list)
         print(f"Negative mode: used {len(B_estimates)} spectra, "
               f"α range {alphas.min():.3f}–{alphas.max():.3f}")
+        _diag_B_estimates = B_arr if params.show_diagnostics else None
+        _diag_most_conv   = (series_used[np.argmin(alphas)]
+                             if params.show_diagnostics else None)
 
     # ── PCA (negative_pca / positive_pca) ─────────────────────────────────
     elif mode in ("negative_pca", "positive_pca"):
@@ -390,12 +455,21 @@ def run_spectra_extraction(
         if len(boot_pairs) < 10:
             boot_pairs = list(zip(boot_SB_raw, boot_scales_raw))
 
-        boot_SB_arr = np.array([p[0] for p in boot_pairs])
+        boot_SB_arr    = np.array([p[0] for p in boot_pairs])
+        boot_scales_arr = np.array([p[1] for p in boot_pairs])
         S_B_lo = np.percentile(boot_SB_arr,  2.5, axis=0)
         S_B_hi = np.percentile(boot_SB_arr, 97.5, axis=0)
 
         print(f"PCA ({mode}): PC1 explains {var_explained*100:.1f}% of variance, "
               f"scale = {scale:.4f}, α range {alphas.min():.3f}–{alphas.max():.3f}")
+
+        if params.show_diagnostics:
+            _diag_pca_scores  = scores
+            _diag_pca_corr_sa = float(np.corrcoef(PC1, S_A)[0, 1])
+            _diag_alpha_min_pca = float(alphas_pca.min())
+            _diag_boot_SB_arr   = boot_SB_arr
+            _diag_boot_sc_arr   = boot_scales_arr
+            _diag_most_conv     = series_used[int(np.argmax(scores))]
 
     # ── POSITIVE PSS ─────────────────────────────────────────────────────────
     elif mode == "positive_pss":
@@ -442,6 +516,23 @@ def run_spectra_extraction(
             f"f_B              : {params.pss_fraction_B} ± {params.pss_fraction_B_error}",
         ]
 
+    # ── Convergence diagnostic (when requested, for modes with a series) ────────
+    if params.show_diagnostics and mode != "positive_pss":
+        _convergence_results = []
+        for frac in params.convergence_fractions:
+            n_sub = max(3, int(round(frac * len(series_used))))
+            sub   = series_used[:n_sub]
+            if mode == "negative":
+                res = _run_neg_subset(sub, S_A, ref_indices,
+                                      params.reference_weighted, sb_tolerance)
+                if res is not None:
+                    _convergence_results.append((frac, n_sub, res[0], res[1]))
+            elif mode in ("negative_pca", "positive_pca"):
+                res = _run_pca_subset(sub, S_A, sb_tolerance)
+                if res is not None:
+                    _convergence_results.append((frac, n_sub, res[0], res[1]))
+        print(f"  Convergence: {len(_convergence_results)} fractions computed.")
+
     return SpectraResult(
         compound        = params.compound_name,
         mode            = mode,
@@ -459,6 +550,14 @@ def run_spectra_extraction(
         n_boot_rejected = n_boot_rejected,
         meta_lines      = meta,
         series_used     = series_used,
+        B_estimates          = _diag_B_estimates,
+        pca_scores           = _diag_pca_scores,
+        pca_corr_sa          = _diag_pca_corr_sa,
+        alpha_min_pca        = _diag_alpha_min_pca,
+        boot_SB_arr          = _diag_boot_SB_arr,
+        boot_scales_arr      = _diag_boot_sc_arr,
+        most_converted_spectrum = _diag_most_conv,
+        convergence_results  = _convergence_results,
     )
 
 
@@ -473,8 +572,9 @@ def plot_overview(
     reference_wavelength_nm=None,
     baseline_inset_nm: int = 50,
     compound_name: str = "",
-) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(9, 5))
+) -> Figure:
+    fig = Figure(figsize=(9, 5))
+    ax  = fig.add_subplot(111)
 
     cmap = mcm.coolwarm
     n    = len(series)
@@ -501,7 +601,7 @@ def plot_overview(
 
     sm = mcm.ScalarMappable(cmap=cmap, norm=mcolors.Normalize(0, max(n - 1, 1)))
     sm.set_array([])
-    plt.colorbar(sm, ax=ax, label="Spectrum index (early → late)",
+    fig.colorbar(sm, ax=ax, label="Spectrum index (early → late)",
                  fraction=0.03, pad=0.01)
 
     ax.set_xlabel("Wavelength (nm)")
@@ -528,12 +628,13 @@ def plot_overview(
     ax_in.tick_params(labelsize=7)
     ax_in.grid(True, linewidth=0.5)
 
-    plt.tight_layout()
+    fig.tight_layout()
     return fig
 
 
-def plot_extraction_result(result: SpectraResult) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(9, 5))
+def plot_extraction_result(result: SpectraResult) -> Figure:
+    fig = Figure(figsize=(9, 5))
+    ax  = fig.add_subplot(111)
 
     if result.series_used is not None:
         n_show = min(5, len(result.series_used))
@@ -564,5 +665,190 @@ def plot_extraction_result(result: SpectraResult) -> plt.Figure:
                 verticalalignment="top", horizontalalignment="left",
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.75))
 
-    plt.tight_layout()
+    fig.tight_layout()
+    return fig
+
+
+def plot_sb_diagnostic(result: "SpectraResult") -> Figure:
+    """
+    Diagnostic plot (negative mode): all individual S_B estimates coloured by α.
+    Shows the spread of estimates and the most-converted spectrum.
+    """
+    grid    = result.grid
+    alphas  = result.alphas
+    B_arr   = result.B_estimates
+    S_B     = result.S_B
+    most    = result.most_converted_spectrum
+    cname   = result.compound or ""
+    y_label = "ε (M⁻¹ cm⁻¹)" if result.S_B.max() > 100 else "Absorbance"
+
+    fig = Figure(figsize=(9, 5))
+    ax  = fig.add_subplot(111)
+
+    if B_arr is not None and alphas is not None and len(B_arr):
+        cmap = mcm.plasma
+        norm = mcolors.Normalize(vmin=float(alphas.min()), vmax=float(alphas.max()))
+        for B_i, a_i in zip(B_arr, alphas):
+            ax.plot(grid, B_i, color=cmap(norm(float(a_i))),
+                    linewidth=0.8, alpha=0.6)
+        sm = mcm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax,
+                     label="α  (0 = fully converted, 1 = barely converted)")
+
+    if most is not None and alphas is not None:
+        ax.plot(grid, most, color="forestgreen", linewidth=1.5,
+                linestyle="--",
+                label=f"Most converted spectrum  (α={float(alphas.min()):.2f})")
+    ax.plot(grid, S_B, color="black", linewidth=2, label="Mean S_B")
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.6)
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel(y_label)
+    ax.set_title(f"Diagnostic: individual S_B estimates — {cname}")
+    ax.legend(fontsize=8)
+    ax.grid(True)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pca_diagnostic(result: "SpectraResult") -> Figure:
+    """
+    Diagnostic plot (PCA modes): PC1 scores / α progress (left) and
+    bootstrap S_B samples coloured by scale factor (right).
+    """
+    grid         = result.grid
+    scores       = result.pca_scores
+    alphas       = result.alphas
+    boot_SB      = result.boot_SB_arr
+    boot_scales  = result.boot_scales_arr
+    S_B          = result.S_B
+    S_B_lo       = result.S_B_lo
+    S_B_hi       = result.S_B_hi
+    most         = result.most_converted_spectrum
+    corr_sa      = result.pca_corr_sa
+    alpha_min    = result.alpha_min_pca
+    cname        = result.compound or ""
+    y_label      = "ε (M⁻¹ cm⁻¹)" if result.S_B.max() > 100 else "Absorbance"
+
+    fig = Figure(figsize=(14, 5), constrained_layout=True)
+    ax_sc, ax_boot = fig.subplots(1, 2)
+
+    # Left: PC1 scores vs index + α on secondary axis
+    if scores is not None:
+        ax_sc.plot(range(len(scores)), scores, "o-", color="steelblue",
+                   markerfacecolor="none", markeredgewidth=1.2, linewidth=1.2,
+                   label="PC1 score")
+        ax_sc.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+        ax_sc.set_ylabel("PC1 score", color="steelblue")
+        ax_sc.tick_params(axis="y", labelcolor="steelblue")
+
+        if alphas is not None:
+            ax_al = ax_sc.twinx()
+            ax_al.plot(range(len(alphas)), alphas, "s--", color="darkorange",
+                       markerfacecolor="none", markeredgewidth=1.0, linewidth=1.0,
+                       label="α (fraction A remaining)")
+            ax_al.axhline(0, color="darkorange", linewidth=0.6, linestyle=":", alpha=0.6)
+            ax_al.axhline(1, color="darkorange", linewidth=0.6, linestyle=":", alpha=0.6)
+            ax_al.set_ylim(-0.1, 1.3)
+            ax_al.set_ylabel("α (fraction A remaining)", color="darkorange")
+            ax_al.tick_params(axis="y", labelcolor="darkorange")
+
+    _corr_str = f"PC1 vs S_A: r = {corr_sa:.3f}" if corr_sa is not None else ""
+    ax_sc.set_title(f"Conversion progress — {_corr_str}")
+    ax_sc.set_xlabel("Spectrum index")
+    ax_sc.grid(True)
+
+    # Annotations
+    _ann = []
+    if alpha_min is not None and alpha_min > 0.3:
+        _ann += [f"Best conversion: {(1-alpha_min)*100:.0f}% B  (α_min={alpha_min:.2f})",
+                 "Extrapolation relies on non-neg. constraint",
+                 "Better conversion → narrower CI"]
+    if corr_sa is not None and result.mode == "negative_pca" and corr_sa < -0.90:
+        _ann += [f"PC1 ≈ −S_A  (r = {corr_sa:.2f})",
+                 "B may have very low absorbance",
+                 "Consider negative mode + ref. λ"]
+    if _ann:
+        ax_sc.text(0.02, 0.97, "\n".join(_ann), transform=ax_sc.transAxes,
+                   fontsize=8, verticalalignment="top",
+                   bbox=dict(boxstyle="round,pad=0.3",
+                             facecolor="lightyellow", alpha=0.9))
+
+    # Right: bootstrap S_B coloured by scale factor
+    if boot_SB is not None and boot_scales is not None:
+        n_show   = min(100, len(boot_SB))
+        step     = max(1, len(boot_SB) // n_show)
+        shown_SB = boot_SB[::step]
+        shown_sc = boot_scales[::step]
+        cmap_b   = mcm.plasma
+        norm_b   = mcolors.Normalize(vmin=float(shown_sc.min()),
+                                     vmax=float(shown_sc.max()))
+        for sb_i, sc_i in zip(shown_SB, shown_sc):
+            ax_boot.plot(grid, sb_i, color=cmap_b(norm_b(float(sc_i))),
+                         linewidth=0.6, alpha=0.4)
+        sm_b = mcm.ScalarMappable(cmap=cmap_b, norm=norm_b)
+        sm_b.set_array([])
+        fig.colorbar(sm_b, ax=ax_boot, label="Bootstrap scale factor")
+
+    if most is not None and alphas is not None:
+        ax_boot.plot(grid, most, color="forestgreen", linewidth=1.5,
+                     linestyle="--",
+                     label=f"Most converted spectrum (α={float(alphas.min()):.2f})")
+    ax_boot.plot(grid, S_B, color="black", linewidth=2, label="S_B (extracted)")
+    if S_B_lo is not None and S_B_hi is not None:
+        ax_boot.fill_between(grid, S_B_lo, S_B_hi,
+                             color="darkorange", alpha=0.25, label="95% CI")
+    ax_boot.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.6)
+    ax_boot.set_title(f"Bootstrap S_B — {cname}")
+    ax_boot.set_xlabel("Wavelength (nm)")
+    ax_boot.set_ylabel(y_label)
+    ax_boot.legend(fontsize=8)
+    ax_boot.grid(True)
+
+    return fig
+
+
+def plot_convergence(result: "SpectraResult") -> Figure:
+    """
+    Convergence diagnostic: S_B extracted from growing fractions of the
+    irradiation series.  Stable curves → reliable extraction.
+    """
+    grid  = result.grid
+    S_B   = result.S_B
+    S_A   = result.S_A
+    conv  = result.convergence_results
+    cname = result.compound or ""
+    mode  = result.mode
+    y_label = "ε (M⁻¹ cm⁻¹)" if result.S_B.max() > 100 else "Absorbance"
+
+    fig = Figure(figsize=(9, 5))
+    ax  = fig.add_subplot(111)
+
+    if conv and len(conv) >= 2:
+        cmap_c = mcm.viridis
+        norm_c = mcolors.Normalize(vmin=0, vmax=1)
+        for frac, n_sub, SB_s, amin_s in conv:
+            c = cmap_c(norm_c(frac))
+            ax.plot(grid, SB_s, color=c, linewidth=1.4,
+                    label=f"{frac:.0%} ({n_sub} spectra), α_min={amin_s:.2f}")
+        sm_c = mcm.ScalarMappable(cmap=cmap_c, norm=norm_c)
+        sm_c.set_array([])
+        fig.colorbar(sm_c, ax=ax,
+                     label="Fraction of irradiation series used",
+                     fraction=0.03, pad=0.01)
+    else:
+        ax.text(0.5, 0.5, "Not enough subsets for convergence plot",
+                ha="center", va="center", transform=ax.transAxes, fontsize=11)
+
+    ax.plot(grid, S_B, color="black", linewidth=2.0,
+            linestyle="--", label="Final S_B (all data)")
+    ax.plot(grid, S_A, color="steelblue", linewidth=1.5,
+            linestyle=":", label="S_A")
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.4)
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel(y_label)
+    ax.set_title(f"Convergence diagnostic — {cname} | mode: {mode}")
+    ax.legend(fontsize=8)
+    ax.grid(True)
+    fig.tight_layout()
     return fig

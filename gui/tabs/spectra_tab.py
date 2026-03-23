@@ -34,6 +34,7 @@ from gui.tabs.spectra_core import (
     load_and_average_files, load_irradiation_series_files, load_pss_files,
     run_spectra_extraction,
     plot_overview, plot_extraction_result,
+    plot_sb_diagnostic, plot_pca_diagnostic, plot_convergence,
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
@@ -448,6 +449,10 @@ class SpectraTab(QWidget):
         run_row.addStretch()
         self._stage3.add_layout(run_row)
 
+        self._diag_chk = QCheckBox("Show diagnostics  "
+                                   "(individual estimates / PCA scores / convergence)")
+        self._stage3.add_widget(self._diag_chk)
+
         self._result_plot = PlotWidget(
             info_title="Extraction Result",
             info_text="Extracted S_B spectrum with ±1σ / 95% CI shading. "
@@ -457,6 +462,26 @@ class SpectraTab(QWidget):
         self._result_plot.setMinimumHeight(320)
         self._result_plot.hide()
         self._stage3.add_widget(self._result_plot)
+
+        # Diagnostic plots (hidden until diagnostics are run)
+        self._diag_plot1 = PlotWidget(
+            info_title="Diagnostic: estimates / PCA",
+            info_text="For negative mode: individual S_B estimates coloured by α.\n"
+                      "For PCA modes: PC1 score progression and bootstrap samples.",
+        )
+        self._diag_plot1.setMinimumHeight(300)
+        self._diag_plot1.hide()
+        self._stage3.add_widget(self._diag_plot1)
+
+        self._diag_plot2 = PlotWidget(
+            info_title="Diagnostic: convergence",
+            info_text="S_B extracted from growing fractions of the irradiation "
+                      "series (25 % → 100 %). Stable overlapping curves indicate "
+                      "a reliable extraction.",
+        )
+        self._diag_plot2.setMinimumHeight(300)
+        self._diag_plot2.hide()
+        self._stage3.add_widget(self._diag_plot2)
 
         # Save row
         save_row = QHBoxLayout()
@@ -509,6 +534,8 @@ class SpectraTab(QWidget):
         self._stage3.set_status(WAITING)
         self._overview_plot.hide()
         self._result_plot.hide()
+        self._diag_plot1.hide()
+        self._diag_plot2.hide()
         self._save_btn.setEnabled(False)
 
     # ── Mode change ───────────────────────────────────────────────────────────
@@ -666,6 +693,7 @@ class SpectraTab(QWidget):
             pss_fraction_B          = self._pss_fb_spin.value(),
             pss_fraction_B_error    = self._pss_fb_err_spin.value(),
             spectrum_indices        = indices,
+            show_diagnostics        = self._diag_chk.isChecked(),
         )
 
         if mode == "positive_pss" and not self._pss_files:
@@ -706,6 +734,21 @@ class SpectraTab(QWidget):
         self._result_plot.set_default_filename(
             f"{cname}_{result.mode}_extraction.png")
         self._result_plot.show()
+
+        # Diagnostic plots
+        self._diag_plot1.hide()
+        self._diag_plot2.hide()
+        if self._diag_chk.isChecked():
+            if result.mode == "negative" and result.B_estimates is not None:
+                self._diag_plot1.set_figure(plot_sb_diagnostic(result))
+                self._diag_plot1.show()
+            elif result.mode in ("negative_pca", "positive_pca") \
+                    and result.pca_scores is not None:
+                self._diag_plot1.set_figure(plot_pca_diagnostic(result))
+                self._diag_plot1.show()
+            if result.convergence_results is not None:
+                self._diag_plot2.set_figure(plot_convergence(result))
+                self._diag_plot2.show()
 
         self._run_status_lbl.setText(
             f"Done — {result.n_spectra_used} of {result.n_spectra_total} spectra used")

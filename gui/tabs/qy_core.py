@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from scipy.integrate import odeint
 from lmfit import minimize, Parameters
 
@@ -479,6 +480,11 @@ class QYFileResult:
     time_s_fit:      np.ndarray
     fit_mask:        np.ndarray
     t_display_per_wl: list[np.ndarray]  # absolute times for display
+    # reference & initial slope data
+    QY_AB_reference:          Optional[float]
+    QY_slopes_raw:            list[float]    # raw Δabs/Δt slopes per monitoring λ
+    n_initial_slopes_pts:     int
+    irradiation_wavelength_nm: float
 
 
 # ── Photon flux loading ───────────────────────────────────────────────────────
@@ -949,7 +955,8 @@ def run_qy_file(
         # Minimal plot arrays (no time-series fit)
         empty_arr = np.array([])
         return QYFileResult(
-            file_name=data_file.name, compound=params.compound_name,
+            file_name=data_file.name,
+            compound=params.compound_name or data_file.stem,
             case=params.case, mon_wls=mon_wls,
             N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
             k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
@@ -966,6 +973,10 @@ def run_qy_file(
             abs_fit_lo_per_wl=[], abs_fit_hi_per_wl=[],
             residuals_2d=empty_arr.reshape(0, len(mon_wls)),
             time_s_fit=time_s_fit, fit_mask=fit_mask, t_display_per_wl=[time_s],
+            QY_AB_reference=params.QY_AB_reference,
+            QY_slopes_raw=[np.nan],
+            n_initial_slopes_pts=params.n_initial_slopes_pts,
+            irradiation_wavelength_nm=params.irradiation_wavelength_nm,
         )
 
     # ── ODE fitting (A_only or AB_both) ──────────────────────────────────────
@@ -1042,7 +1053,7 @@ def run_qy_file(
     method = ("ODE_lmfit_LED_full" if use_led_full else "ODE_lmfit")
 
     # ── Initial slopes ────────────────────────────────────────────────────────
-    QY_slopes, _ = initial_slopes_QY(
+    QY_slopes, slopes_raw = initial_slopes_QY(
         time_s_ode, abs_data_fit, params.n_initial_slopes_pts,
         eps_A_irr, eps_A_mon, eps_B_mon,
         N_mol_s, V_L, params.path_length_cm, conc_A_0)
@@ -1105,7 +1116,8 @@ def run_qy_file(
     ])
 
     return QYFileResult(
-        file_name=data_file.name, compound=params.compound_name,
+        file_name=data_file.name,
+        compound=params.compound_name or data_file.stem,
         case=params.case, mon_wls=mon_wls,
         N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
         k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
@@ -1127,36 +1139,48 @@ def run_qy_file(
         residuals_2d=residuals_2d,
         time_s_fit=time_s_fit, fit_mask=fit_mask,
         t_display_per_wl=t_display_per_wl,
+        QY_AB_reference=params.QY_AB_reference,
+        QY_slopes_raw=slopes_raw,
+        n_initial_slopes_pts=params.n_initial_slopes_pts,
+        irradiation_wavelength_nm=params.irradiation_wavelength_nm,
     )
 
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
-def plot_qy_result(result: QYFileResult) -> plt.Figure:
+def plot_qy_result(result: QYFileResult) -> Figure:
     """Main result plot: absorbance per wavelength + residuals + concentrations."""
     n_mon = len(result.mon_wls)
 
     if result.case == "A_thermal_PSS":
         # Simple bar chart for PSS algebraic
-        fig, ax = plt.subplots(figsize=(5, 4))
+        fig = Figure(figsize=(5, 4))
+        ax  = fig.add_subplot(111)
         ax.bar(["Φ_AB (PSS)"], [result.QY_AB],
                yerr=[result.QY_AB_sigma_total],
                color="#c0392b", alpha=0.8, capsize=6)
+        if result.QY_AB_reference is not None:
+            ax.axhline(result.QY_AB_reference, color="green", linewidth=1.5,
+                       linestyle="--", label=f"Ref Φ_AB = {result.QY_AB_reference:.4f}")
+            ax.legend(fontsize=8)
         ax.set_ylabel("Quantum yield Φ_AB")
         ax.set_title(f"{result.compound}  |  {result.file_name}")
         ax.grid(True, axis="y", alpha=0.4)
-        plt.tight_layout()
+        fig.tight_layout()
         return fig
 
     n_rows = n_mon + 2
-    fig, axes = plt.subplots(
+    fig = Figure(figsize=(8, 2.5 * n_rows), constrained_layout=True)
+    axes = fig.subplots(
         n_rows, 1,
-        figsize=(8, 2.5 * n_rows),
         gridspec_kw={"height_ratios": [3] * n_mon + [1.5, 2.5]},
-        constrained_layout=True,
     )
     if n_rows == 1:
         axes = [axes]
+
+    # Reconstruct fit data for initial-slope tangent
+    abs_data_fit = result.abs_data[result.fit_mask, :]
+    n_slope_pts  = min(result.n_initial_slopes_pts, len(result.time_s_fit))
 
     for j, wl_nm in enumerate(result.mon_wls):
         ax = axes[j]
@@ -1172,6 +1196,16 @@ def plot_qy_result(result: QYFileResult) -> plt.Figure:
                             result.abs_fit_lo_per_wl[j],
                             result.abs_fit_hi_per_wl[j],
                             color="#e67e22", alpha=0.30, label="±σ_total")
+        # Initial slope tangent
+        if (result.QY_slopes_raw and j < len(result.QY_slopes_raw)
+                and not np.isnan(result.QY_slopes_raw[j])
+                and n_slope_pts >= 2):
+            t_tang = result.time_s_fit[:n_slope_pts]
+            y_tang = abs_data_fit[0, j] + result.QY_slopes_raw[j] * (t_tang - t_tang[0])
+            slope_lbl = (f"Initial slope  Φ={result.QY_slopes[j]:.4f}"
+                         if not np.isnan(result.QY_slopes[j]) else "Initial slope")
+            ax.plot(t_tang, y_tang, ":", color="#9b59b6", linewidth=2.0,
+                    label=slope_lbl)
         ax.axvspan(result.time_s_fit[0], result.time_s_fit[-1],
                    alpha=0.10, color="gray",
                    label="Fit window" if j == 0 else None)
@@ -1188,6 +1222,8 @@ def plot_qy_result(result: QYFileResult) -> plt.Figure:
             f"R²={result.r2_per_wl[j]:.4f}")
     lines.append(f"Mean Φ_AB = {result.QY_AB:.4f}  σ_total = {result.QY_AB_sigma_total:.4f}")
     lines.append(f"R² (mean) = {result.r2:.4f}")
+    if result.QY_AB_reference is not None:
+        lines.append(f"Ref Φ_AB  = {result.QY_AB_reference:.4f}")
     axes[0].text(0.97, 0.97, "\n".join(lines),
                  transform=axes[0].transAxes, fontsize=8,
                  verticalalignment="top", horizontalalignment="right",
