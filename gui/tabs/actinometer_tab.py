@@ -543,6 +543,7 @@ class _LEDCharacterisationPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._output_path: Optional[Path] = None
+        self._raw_path:    Optional[Path] = None
         self._result: Optional[LEDResult] = None
         self._worker: Optional[Worker] = None
         self._build_ui()
@@ -787,7 +788,7 @@ class _LEDCharacterisationPanel(QWidget):
         return edit
 
     def _browse_file(self, edit: QLineEdit):
-        start = str(self._output_path or Path.home())
+        start = str(self._raw_path or self._output_path or Path.home())
         path, _ = QFileDialog.getOpenFileName(
             self, "Select CSV file", start, "CSV files (*.csv)")
         if path:
@@ -855,6 +856,9 @@ class _LEDCharacterisationPanel(QWidget):
         self._output_path = path
         plots_dir = path / "led" / "results" / "plots"
         self._plot.set_save_dir(plots_dir)
+
+    def set_raw_path(self, path: Path):
+        self._raw_path = path
 
     # ── Stage 1 status ─────────────────────────────────────────────────────
 
@@ -1044,6 +1048,7 @@ class ActinometerTab(QWidget):
 
     def set_raw_path(self, path: Path):
         self._chem_panel.set_raw_path(path)
+        self._led_panel.set_raw_path(path)
 
     def apply_prefs(self, prefs):
         self._chem_panel.apply_prefs(prefs)
