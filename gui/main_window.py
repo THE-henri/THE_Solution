@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
 
         # ── Signal wiring ──────────────────────────────────────────────────
         self._folder_header.raw_folder_changed.connect(self._half_life_tab.set_raw_path)
+        self._folder_header.raw_folder_changed.connect(self._actinometer_tab.set_raw_path)
         self._folder_header.output_folder_changed.connect(self._on_output_changed)
         self._folder_header.output_folder_changed.connect(self._log.set_log_dir)
         self._folder_header.prefs_save_requested.connect(self._save_prefs)

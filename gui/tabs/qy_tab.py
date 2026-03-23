@@ -1087,8 +1087,14 @@ class QuantumYieldTab(QWidget):
     def _show_result(self, idx: int):
         if not self._results or idx >= len(self._results):
             return
-        fig = plot_qy_result(self._results[idx])
+        r = self._results[idx]
+        fig = plot_qy_result(r)
         self._plot.set_figure(fig)
+        if self._output_path:
+            self._plot.set_save_dir(
+                self._output_path / "quantum_yield" / "results" / "plots")
+        stem = Path(r.file_name).stem if r.file_name else f"qy_{idx}"
+        self._plot.set_default_filename(f"{stem}_QY.png")
 
     def _populate_table(self):
         self._table.setRowCount(0)
@@ -1142,7 +1148,8 @@ class QuantumYieldTab(QWidget):
                 })
         df = pd.DataFrame(rows)
         default_name = "qy_master.csv"
-        default_dir  = str(self._output_path or Path.home())
+        default_dir  = str(self._output_path / "quantum_yield" / "results"
+                           if self._output_path else Path.home())
         path, _ = QFileDialog.getSaveFileName(
             self, "Save QY master CSV",
             str(Path(default_dir) / default_name),
@@ -1155,6 +1162,7 @@ class QuantumYieldTab(QWidget):
 
     def set_output_path(self, path: Path):
         self._output_path = path
+        self._plot.set_save_dir(path / "quantum_yield" / "results" / "plots")
 
     def apply_prefs(self, prefs):
         if not hasattr(prefs, "quantum_yield"):

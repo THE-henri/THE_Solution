@@ -189,5 +189,7 @@ class PlotWidget(QWidget):
             self, "Save image", start,
             "PNG image (*.png);;PDF (*.pdf);;SVG (*.svg)")
         if path:
+            from pathlib import Path as _Path
+            _Path(path).parent.mkdir(parents=True, exist_ok=True)
             self._fig.savefig(path, dpi=150, bbox_inches="tight")
             print(f"Plot saved → {path}")

@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem,
-    QFileDialog, QAbstractItemView, QFrame, QTabWidget,
+    QFileDialog, QAbstractItemView, QAbstractScrollArea, QFrame, QTabWidget,
 )
 
 from gui.tabs.actinometer_core import (
@@ -43,6 +43,7 @@ class _ChemActinometerPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._output_path: Optional[Path] = None
+        self._raw_path:    Optional[Path] = None
         self._results: list[ActinometerResult] = []
         self._current_idx: int = 0
         self._worker: Optional[Worker] = None
@@ -224,7 +225,10 @@ class _ChemActinometerPanel(QWidget):
         rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for c in range(1, 7):
             rh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
-        self._res_table.setMaximumHeight(150)
+        self._res_table.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self._res_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._res_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._stage3.add_widget(self._res_table)
 
@@ -281,10 +285,13 @@ class _ChemActinometerPanel(QWidget):
         plots_dir = path / "actinometer" / "results" / "plots"
         self._plot.set_save_dir(plots_dir)
 
+    def set_raw_path(self, path: Path):
+        self._raw_path = path
+
     # ── File list ──────────────────────────────────────────────────────────
 
     def _select_files(self):
-        start = str(self._output_path or Path.home())
+        start = str(self._raw_path or self._output_path or Path.home())
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Select actinometry CSV files", start, "CSV files (*.csv)")
         existing = {self._file_list.item(i).data(Qt.ItemDataRole.UserRole)
@@ -932,6 +939,9 @@ class ActinometerTab(QWidget):
     def set_output_path(self, path: Path):
         self._chem_panel.set_output_path(path)
         self._led_panel.set_output_path(path)
+
+    def set_raw_path(self, path: Path):
+        self._chem_panel.set_raw_path(path)
 
     def apply_prefs(self, prefs):
         self._chem_panel.apply_prefs(prefs)

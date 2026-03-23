@@ -602,7 +602,7 @@ class SpectraTab(QWidget):
 
         self._overview_plot.set_figure(fig)
         if self._output_path:
-            self._overview_plot.set_save_dir(self._output_path / "spectra" / "plots")
+            self._overview_plot.set_save_dir(self._output_path / "spectra" / "results" / "plots")
         self._overview_plot.set_default_filename("data_overview.png")
         self._overview_plot.show()
 
@@ -729,7 +729,7 @@ class SpectraTab(QWidget):
 
         self._result_plot.set_figure(fig)
         if self._output_path:
-            self._result_plot.set_save_dir(self._output_path / "spectra" / "plots")
+            self._result_plot.set_save_dir(self._output_path / "spectra" / "results" / "plots")
         cname = result.compound or "spectra"
         self._result_plot.set_default_filename(
             f"{cname}_{result.mode}_extraction.png")
@@ -765,7 +765,7 @@ class SpectraTab(QWidget):
         if self._result is None:
             return
         r = self._result
-        default_dir = str(self._output_path / "spectra" / "extracted") \
+        default_dir = str(self._output_path / "spectra" / "results") \
             if self._output_path else ""
         cname = r.compound or "spectra"
         default_name = f"{cname}_{r.mode}_spectra.csv"

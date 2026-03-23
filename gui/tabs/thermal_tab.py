@@ -200,6 +200,7 @@ class _ThermalPanel(QWidget):
 
     def set_output_path(self, path: Path):
         self._output_path = path
+        self._plot.set_save_dir(self._output_subdir() / "plots")
         # Try auto-loading the master CSV immediately
         self._load_from_results(silent=True)
 

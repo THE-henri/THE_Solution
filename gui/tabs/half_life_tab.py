@@ -700,7 +700,8 @@ class KineticsPanel(QWidget):
                 ),
                 min_height=300,
             )
-            pw.set_save_dir(self._output_path)
+            pw.set_save_dir(self._output_path / "half_life" / "results" / "plots"
+                            if self._output_path else None)
             pw.set_default_filename(
                 f"{file_stem}_{r.label}_{r.temperature_c:.0f}C.png"
                 .replace(" ", "_").replace("/", "-"))
@@ -764,9 +765,8 @@ class KineticsPanel(QWidget):
     def set_output_path(self, path: Path):
         self._output_path = path
         self._k_master.set_output_path(path)
-        plots_dir = path / "plots" / "half_life"
+        plots_dir = path / "half_life" / "results" / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
-        (path / "data" / "half_life" / "results").mkdir(parents=True, exist_ok=True)
         self._k_raw_plot.set_save_dir(plots_dir)
 
 
@@ -1355,7 +1355,8 @@ class ScanningKineticsPanel(QWidget):
                 ),
                 min_height=300,
             )
-            pw.set_save_dir(self._output_path)
+            pw.set_save_dir(self._output_path / "half_life" / "results" / "plots"
+                            if self._output_path else None)
             pw.set_default_filename(
                 f"{file_stem}_{r.label}_{r.temperature_c:.0f}C.png"
                 .replace(" ", "_").replace("/", "-"))
@@ -1405,9 +1406,8 @@ class ScanningKineticsPanel(QWidget):
     def set_output_path(self, path: Path):
         self._output_path = path
         self._sk_master.set_output_path(path)
-        plots_dir = path / "plots" / "half_life"
+        plots_dir = path / "half_life" / "results" / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
-        (path / "data" / "half_life" / "results").mkdir(parents=True, exist_ok=True)
         self._sk_raw_plot.set_save_dir(plots_dir)
 
 
