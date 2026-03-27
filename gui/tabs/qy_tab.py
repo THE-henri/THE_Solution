@@ -15,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
@@ -86,6 +87,47 @@ def _browse_row(label_text, line_edit, button):
     row = _field_row(label_text, line_edit, width=320)
     row.insertWidget(row.count() - 1, button)
     return row
+
+
+# ── Scientific-notation line edit ─────────────────────────────────────────────
+
+class _SciLineEdit(QLineEdit):
+    """
+    QLineEdit that accepts and displays floating-point values in scientific
+    notation (e.g. 3.70e-08).  Provides the same .value() / .setValue() /
+    valueChanged interface as QDoubleSpinBox so the rest of the code needs
+    no special-casing.
+    """
+    valueChanged = pyqtSignal(float)
+
+    def __init__(self, default_val: float = 1e-9, parent=None):
+        super().__init__(parent)
+        self._val = float(default_val)
+        v = QDoubleValidator(0.0, 1e20, 15, self)
+        v.setNotation(QDoubleValidator.Notation.ScientificNotation)
+        self.setValidator(v)
+        self.setText(f"{self._val:.4e}")
+        self.editingFinished.connect(self._on_finished)
+
+    def _on_finished(self):
+        text = self.text().strip()
+        try:
+            v = float(text)
+            self._val = v
+            self.setText(f"{v:.4e}")
+            self.valueChanged.emit(v)
+        except ValueError:
+            self.setText(f"{self._val:.4e}")   # revert to last good value
+
+    def value(self) -> float:
+        try:
+            return float(self.text())
+        except ValueError:
+            return self._val
+
+    def setValue(self, v: float):
+        self._val = float(v)
+        self.setText(f"{self._val:.4e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -268,23 +310,17 @@ class QuantumYieldTab(QWidget):
         # manual mol/s
         self._flux_manual_grp = QGroupBox("Manual photon flux (mol s⁻¹)")
         mg = QVBoxLayout(self._flux_manual_grp)
-        self._flux_mol_s_spin = QDoubleSpinBox()
-        self._flux_mol_s_spin.setRange(0, 1)
-        self._flux_mol_s_spin.setDecimals(6)
-        self._flux_mol_s_spin.setSingleStep(1e-10)
-        self._flux_mol_s_spin.setValue(1e-9)
-        _row_flux_mol_s = _field_row("N (mol s\u207b\u00b9):", self._flux_mol_s_spin, 120, pref=True)
+        self._flux_mol_s_spin = _SciLineEdit(1e-9)
+        self._flux_mol_s_spin.setFixedWidth(120)
+        _row_flux_mol_s = _field_row("N (mol s\u207b\u00b9):", self._flux_mol_s_spin, pref=True)
         _row_flux_mol_s.insertWidget(1, InfoButton(
             "Photon flux N (mol s\u207b\u00b9)",
             "Photon flux delivered to the sample in mol photons per second.\nObtained from chemical actinometry or power meter readings.\n\nTypical values: 1\u00d710\u207b\u2079 \u2013 1\u00d710\u207b\u2076 mol s\u207b\u00b9 for lab light sources."
         ))
         mg.addLayout(_row_flux_mol_s)
-        self._flux_std_spin = QDoubleSpinBox()
-        self._flux_std_spin.setRange(0, 1)
-        self._flux_std_spin.setDecimals(6)
-        self._flux_std_spin.setSingleStep(1e-11)
-        self._flux_std_spin.setValue(0.0)
-        _row_flux_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_std_spin, 120, pref=True)
+        self._flux_std_spin = _SciLineEdit(0.0)
+        self._flux_std_spin.setFixedWidth(120)
+        _row_flux_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_std_spin, pref=True)
         _row_flux_std.insertWidget(1, InfoButton(
             "Photon flux uncertainty (mol s\u207b\u00b9)",
             "Standard deviation of the photon flux N.\nPropagated into the final quantum yield uncertainty.\n\nSet to 0 if unknown (uncertainty will not be reported)."
@@ -306,11 +342,9 @@ class QuantumYieldTab(QWidget):
             "Optical power measured at the sample position in microwatts.\nConverted to mol s\u207b\u00b9 using: N = P\u00b7\u03bb / (N_A\u00b7h\u00b7c)\n\nMeasure with a calibrated power meter placed at the cuvette\nposition before and after the experiment."
         ))
         ug.addLayout(_row_flux_uw)
-        self._flux_uw_std_spin = QDoubleSpinBox()
-        self._flux_uw_std_spin.setRange(0, 1)
-        self._flux_uw_std_spin.setDecimals(6)
-        self._flux_uw_std_spin.setValue(0.0)
-        _row_flux_uw_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_uw_std_spin, 120)
+        self._flux_uw_std_spin = _SciLineEdit(0.0)
+        self._flux_uw_std_spin.setFixedWidth(120)
+        _row_flux_uw_std = _field_row("N std (mol s\u207b\u00b9):", self._flux_uw_std_spin)
         _row_flux_uw_std.insertWidget(1, InfoButton(
             "Power standard deviation (\u00b5W)",
             "Standard deviation of the power measurement (\u00b5W).\nPropagated through the power\u2192flux conversion into the\nfinal quantum yield uncertainty."
@@ -361,6 +395,12 @@ class QuantumYieldTab(QWidget):
         lg.addLayout(_row_led_integ)
         self._led_integ_combo.currentTextChanged.connect(self._update_irr_wl_visibility)
         self._stage1.add_widget(self._flux_led_grp)
+
+        # resolved N display — always visible
+        self._flux_resolved_lbl = QLabel("N = —  mol s⁻¹")
+        self._flux_resolved_lbl.setStyleSheet(
+            "color:#9ece6a; font-style:italic; padding:2px 4px;")
+        self._stage1.add_widget(self._flux_resolved_lbl)
 
         parent_layout.addWidget(self._stage1)
         self._on_flux_src_changed("manual_mol_s")
@@ -436,7 +476,7 @@ class QuantumYieldTab(QWidget):
         _row_vol = _field_row("Volume:", self._vol_spin, 100, pref=True)
         _row_vol.insertWidget(1, InfoButton(
             "Volume (mL)",
-            "Volume of solution in the cuvette in mL.\nUsed to convert photon flux density into absorbed photon rate.\n\nUse the actual illuminated volume, not the total cuvette volume\nif your illumination does not cover the full cuvette."
+            "Total volume of solution in the cuvette in mL.\n\nFor instant mixing (standard cuvette), always use the TOTAL solution volume,\nregardless of beam size. The formula requires the total volume to correctly\nconvert between moles and concentration.\n\nOnly use a smaller 'irradiated zone' volume if there is truly no mixing\nand the reaction is spatially confined — this is rarely the case."
         ))
         self._stage2.add_layout(_row_vol)
 
@@ -467,11 +507,22 @@ class QuantumYieldTab(QWidget):
         sep.setStyleSheet("color:#555;"); self._stage2.add_widget(sep)
 
         self._baseline_combo = QComboBox()
-        self._baseline_combo.addItems(["first_point", "none", "plateau", "file"])
-        _row_baseline = _field_row("Offset correction:", self._baseline_combo, 120)
+        self._baseline_combo.addItems([
+            "subtract_first_point", "none", "subtract_plateau", "align_to_spectrum"])
+        _row_baseline = _field_row("Offset correction:", self._baseline_combo, 180)
         _row_baseline.insertWidget(1, InfoButton(
             "Offset correction method",
-            "How to remove the baseline offset from the kinetic traces:\n\n'first_point' — subtract the very first data point.\n'none' — no correction applied.\n'plateau' — subtract the mean of a flat plateau region.\n'file' — load an external baseline spectrum.\n\nUse 'plateau' when a stable equilibrium is reached at the end."
+            "How to correct the kinetic traces so that absorbance values match\n"
+            "the conditions under which ε was measured:\n\n"
+            "'subtract_first_point' — subtract the first data point from all points.\n"
+            "  Use only when kinetic data is already in absolute AU (not zeroed).\n\n"
+            "'subtract_plateau' — subtract the mean of a pre-irradiation plateau.\n"
+            "  Same constraint as subtract_first_point.\n\n"
+            "'align_to_spectrum' — OFFSET CORRECTION: loads an initial Cary 60 scan\n"
+            "  (measured under normal, non-zeroed conditions, same as ε) and shifts\n"
+            "  the kinetic trace to match it. Use this when the instrument was zeroed\n"
+            "  before the kinetic run. [A]₀ is taken directly from the initial spectrum.\n\n"
+            "'none' — no correction. Use when data is already in absolute AU."
         ))
         self._stage2.add_layout(_row_baseline)
         self._baseline_combo.currentTextChanged.connect(self._on_baseline_changed)
@@ -1057,13 +1108,24 @@ class QuantumYieldTab(QWidget):
                   self._led_integ_combo):
             w.currentTextChanged.connect(self._mark_stale)
         for w in (self._delta_t_spin, self._scans_per_grp_spin,
-                  self._irr_wl_spin, self._flux_mol_s_spin,
-                  self._flux_std_spin, self._flux_uw_spin,
-                  self._flux_uw_std_spin, self._actin_filter_spin):
+                  self._irr_wl_spin, self._flux_uw_spin,
+                  self._actin_filter_spin):
+            w.valueChanged.connect(self._mark_stale)
+        for w in (self._flux_mol_s_spin, self._flux_std_spin,
+                  self._flux_uw_std_spin):
             w.valueChanged.connect(self._mark_stale)
         self._first_cycle_off_chk.toggled.connect(self._mark_stale)
         for w in (self._actin_csv_edit, self._led_csv_edit):
             w.textChanged.connect(self._mark_stale)
+
+        # Live N display
+        self._flux_mol_s_spin.valueChanged.connect(lambda _: self._update_flux_display())
+        self._flux_std_spin.valueChanged.connect(lambda _: self._update_flux_display())
+        self._flux_uw_spin.valueChanged.connect(lambda _: self._update_flux_display())
+        self._irr_wl_spin.valueChanged.connect(lambda _: self._update_flux_display())
+        self._actin_csv_edit.textChanged.connect(lambda _: self._update_flux_display())
+        self._actin_filter_spin.valueChanged.connect(lambda _: self._update_flux_display())
+        self._led_csv_edit.textChanged.connect(lambda _: self._update_flux_display())
         self._file_list.model().rowsInserted.connect(self._mark_stale)
         self._file_list.model().rowsRemoved.connect(self._mark_stale)
 
@@ -1107,6 +1169,86 @@ class QuantumYieldTab(QWidget):
         self._flux_actin_grp.setVisible(text == "actinometry")
         self._flux_led_grp.setVisible(text == "led_spectrum")
         self._update_irr_wl_visibility()
+        self._update_flux_display()
+
+    def _update_flux_display(self):
+        """Refresh the resolved-N label based on the current flux source."""
+        src = self._flux_src_combo.currentText()
+        try:
+            if src == "manual_mol_s":
+                n = self._flux_mol_s_spin.value()
+                std = self._flux_std_spin.value()
+                txt = f"N = {n:.4e} mol s⁻¹"
+                if std > 0:
+                    txt += f"  ±  {std:.4e}"
+            elif src == "manual_uW":
+                p_uW = self._flux_uw_spin.value()
+                lam  = self._irr_wl_spin.value()
+                if p_uW > 0 and lam > 0:
+                    from gui.tabs.qy_core import uW_to_mol_s
+                    n = uW_to_mol_s(p_uW, lam)
+                    txt = f"N = {n:.4e} mol s⁻¹  (from {p_uW:.4g} µW @ {lam:.1f} nm)"
+                else:
+                    txt = "N = —  mol s⁻¹"
+            elif src == "actinometry":
+                txt = self._resolve_n_from_actin_csv()
+            elif src == "led_spectrum":
+                txt = self._resolve_n_from_led_csv()
+            else:
+                txt = "N = —  mol s⁻¹"
+        except Exception as e:
+            txt = f"N = ? ({e})"
+        self._flux_resolved_lbl.setText(txt)
+
+    def _resolve_n_from_actin_csv(self) -> str:
+        path_txt = self._actin_csv_edit.text().strip()
+        if not path_txt:
+            return "N = —  (no actinometry CSV)"
+        p = Path(path_txt)
+        if not p.exists():
+            return "N = —  (file not found)"
+        try:
+            df = pd.read_csv(p)
+            filt = self._actin_filter_spin.value()
+            if filt > 0 and "Irradiation_nm" in df.columns:
+                df = df[df["Irradiation_nm"] == filt]
+            if df.empty:
+                return "N = —  (no matching row in CSV)"
+            row = df.iloc[-1]
+            n = float(row["Photon_flux_mol_s"])
+            std = float(row["Photon_flux_std_mol_s"]) if "Photon_flux_std_mol_s" in row.index else 0.0
+            txt = f"N = {n:.4e} mol s⁻¹"
+            if std > 0:
+                txt += f"  ±  {std:.4e}"
+            return txt
+        except Exception as e:
+            return f"N = ? ({e})"
+
+    def _resolve_n_from_led_csv(self) -> str:
+        path_txt = self._led_csv_edit.text().strip()
+        if not path_txt:
+            return "N = —  (no LED spectrum CSV)"
+        p = Path(path_txt)
+        if not p.exists():
+            return "N = —  (file not found)"
+        try:
+            df = pd.read_csv(p, comment="#")
+            if "N_total_mol_s" in df.columns and not pd.isna(df["N_total_mol_s"].iloc[0]):
+                n = float(df["N_total_mol_s"].iloc[0])
+            elif "N_mol_s_per_nm" in df.columns and "wavelength_nm" in df.columns:
+                n = float(np.trapezoid(df["N_mol_s_per_nm"].values,
+                                       df["wavelength_nm"].values))
+            else:
+                return "N = —  (unrecognised CSV format)"
+            std = 0.0
+            if "N_std_mol_s" in df.columns and not pd.isna(df["N_std_mol_s"].iloc[0]):
+                std = float(df["N_std_mol_s"].iloc[0])
+            txt = f"N = {n:.4e} mol s⁻¹"
+            if std > 0:
+                txt += f"  ±  {std:.4e}"
+            return txt
+        except Exception as e:
+            return f"N = ? ({e})"
 
     def _update_irr_wl_visibility(self):
         led_full = (self._flux_src_combo.currentText() == "led_spectrum"
@@ -1114,8 +1256,8 @@ class QuantumYieldTab(QWidget):
         self._irr_wl_widget.setVisible(not led_full)
 
     def _on_baseline_changed(self, text):
-        self._baseline_plat_grp.setVisible(text == "plateau")
-        self._baseline_file_grp.setVisible(text == "file")
+        self._baseline_plat_grp.setVisible(text == "subtract_plateau")
+        self._baseline_file_grp.setVisible(text == "align_to_spectrum")
 
     def _on_autodetect_toggled(self, checked):
         self._auto_detect_grp.setVisible(checked)
@@ -1325,14 +1467,14 @@ class QuantumYieldTab(QWidget):
         p.wavelength_tolerance_nm = self._wl_tol_spin.value()
 
         p.baseline_correction = self._baseline_combo.currentText()
-        if p.baseline_correction == "plateau":
+        if p.baseline_correction == "subtract_plateau":
             v = self._plat_dur_spin.value()
             p.offset_plateau_duration_s  = v if v > 0 else None
             vs = self._plat_start_spin.value()
             p.baseline_plateau_start_s   = vs if vs > 0 else None
             ve = self._plat_end_spin.value()
             p.baseline_plateau_end_s     = ve if ve > 0 else None
-        elif p.baseline_correction == "file":
+        elif p.baseline_correction == "align_to_spectrum":
             txt = self._baseline_file_edit.text().strip()
             p.baseline_file = Path(txt) if txt else None
 

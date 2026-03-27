@@ -129,7 +129,8 @@ _CSS = f"""
 
 # ── Section content ────────────────────────────────────────────────────────────
 
-_SECTIONS: dict[str, str] = {}
+_SECTIONS:     dict[str, str] = {}   # QY sections
+_SECTIONS_LED: dict[str, str] = {}   # LED / Actinometry sections
 
 # ─────────────────────────────────────────────────────────────────────────────
 _SECTIONS["Quantum Yield — Overview"] = f"""
@@ -474,49 +475,64 @@ and all monitoring wavelengths).
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-_SECTIONS["Baseline Correction"] = f"""
-<h1>Baseline Correction</h1>
+_SECTIONS["Offset Correction"] = f"""
+<h1>Offset Correction</h1>
 
 <p>
-Small offsets in the measured absorbance (instrument drift, cuvette repositioning,
-or solvent baseline) are removed before the ODE fit via one of four methods.
+Many spectrophotometers zero the detector automatically before a kinetic run
+("autozero"), so the recorded absorbance starts at 0 even though the sample has a
+real non-zero absorbance.  An <b>offset correction</b> compensates for this and
+restores the absolute absorbance scale — which is required to compute the correct
+initial concentration [A]₀.
 </p>
 
+<div class="warn">
+<b>Important:</b> The offset correction must be applied consistently.
+If <code>none</code> is selected, the raw absorbance trace is used directly to
+derive [A]₀.  This is only valid when the instrument did <em>not</em> autozero
+(i.e. the trace already reflects absolute AU).  Any autozero or offset shift in
+the data makes the derived [A]₀ — and therefore Φ — wrong if no correction is applied.
+</div>
+
 <table>
-  <tr><th>Method</th><th>Description</th></tr>
+  <tr><th>Method</th><th>When to use</th><th>What it does</th></tr>
   <tr>
     <td><code>none</code></td>
-    <td>No correction applied.  Use when the baseline is already aligned.</td>
+    <td>Data is already in absolute AU (no autozero performed)</td>
+    <td>No correction applied.</td>
   </tr>
   <tr>
-    <td><code>first_point</code></td>
-    <td>Subtract the absorbance at the first loaded time point from the entire trace
-        (per monitoring wavelength).  The trace then starts at zero.</td>
+    <td><code>subtract_first_point</code></td>
+    <td>Instrument autozero'd at t = 0; no pre-irradiation dark period</td>
+    <td>Subtracts the absorbance at the first loaded time point from the entire
+        trace.  The trace is shifted to start at zero; [A]₀ must then be obtained
+        from an independent source (e.g. manual or <code>align_to_spectrum</code>).</td>
   </tr>
   <tr>
-    <td><code>plateau</code></td>
-    <td>Subtract the mean absorbance over a pre-irradiation plateau window
-        [t_start, t_end].  More robust than <code>first_point</code> when the
-        pre-irradiation period has noise.</td>
+    <td><code>subtract_plateau</code></td>
+    <td>Instrument autozero'd; a pre-irradiation plateau is recorded</td>
+    <td>Subtracts the mean absorbance over a user-defined plateau window
+        [t_start, t_end].  More robust than <code>subtract_first_point</code>
+        against noise at t = 0.</td>
   </tr>
   <tr>
-    <td><code>file</code></td>
-    <td><b>Offset alignment</b> — loads an initial spectrum (Cary 60 CSV) and
-        computes the difference between that spectrum and the first point of the
-        kinetic trace.  This offset is added to every point, aligning the kinetic
-        baseline with the independently measured initial spectrum.  Recommended
-        when the cuvette was repositioned between the initial scan and the
-        kinetic run.</td>
+    <td><code>align_to_spectrum</code></td>
+    <td>Kinetic trace is zeroed but an initial full-spectrum scan is available</td>
+    <td><b>Recommended.</b>  Loads an initial spectrum file (Cary 60 CSV),
+        extracts A(λ_mon) from it, and adds the difference
+        (A_initial_spec − A_kinetic_t0) to every point of the kinetic trace.
+        This rigidly shifts the kinetic trace onto the absolute absorbance scale
+        established by the spectrum.  [A]₀ is then read from that corrected trace,
+        giving the physically correct initial concentration.</td>
   </tr>
 </table>
 
 <div class="note">
-<b>Plateau window:</b> When using the <code>plateau</code> method, the window is
+<b>Plateau window parameters:</b> For <code>subtract_plateau</code>, the window is
 defined by <code>baseline_plateau_start_s</code> and <code>baseline_plateau_end_s</code>.
-If these are <code>None</code>, the first time point and the fit start time are used.
-The <code>offset_plateau_duration_s</code> parameter controls how many seconds at the
-beginning of the kinetic trace are averaged to represent the pre-irradiation level when
-offset-aligning.
+For <code>align_to_spectrum</code>, <code>offset_plateau_duration_s</code> controls how
+many seconds at the start of the kinetic trace are averaged to represent the pre-irradiation
+level before the shift is applied.
 </div>
 """
 
@@ -791,6 +807,268 @@ verification experiments.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_LED["LED Actinometry — How It Works"] = f"""
+<h1>LED Actinometry — How It Works</h1>
+
+<p>
+LED actinometry measures the photon flux N (mol s⁻¹) of an LED source by
+irradiating a chemical actinometer solution (e.g. potassium ferrioxalate) and
+fitting the rate of photoproduct formation.  The result (N_chem) is compared to
+the independently measured flux N_LED obtained from the LED emission spectrum
+and optical power.
+</p>
+
+<h2>Step 1 — Beer–Lambert Reference Spectrum</h2>
+<p>
+A full absorption spectrum of the actinometer solution is loaded.  For scanning
+kinetic data the mid-scan of the first group is used; for fixed-wavelength kinetic
+data an independently measured initial spectrum must be supplied.
+</p>
+<p>
+The absorbance at 562 nm, A(562), is extracted.  This serves as the anchor for
+scaling ε to any other wavelength via Beer–Lambert:
+</p>
+<pre class="eq">ε(λ) = ε_562 · A(λ) / A(562)</pre>
+
+<h2>Step 2 — Effective ε and QY (ε_eff, QY_eff)</h2>
+<p>
+Two integration modes are available:
+</p>
+
+<table>
+  <tr><th>Mode</th><th>ε_eff definition</th><th>QY_eff definition</th></tr>
+  <tr>
+    <td><code>scalar</code></td>
+    <td>ε at the flux-weighted effective wavelength λ_eff:<br>
+        <code>ε_eff = ε_562 · A(λ_eff) / A(562)</code></td>
+    <td><code>QY(λ_eff)</code> from the actinometer's wavelength-dependent
+        quantum yield function</td>
+  </tr>
+  <tr>
+    <td><code>spectral</code></td>
+    <td>Flux-weighted spectral average over the full LED band:<br>
+        <code>ε_eff = ∫ f(λ) · ε(λ) dλ / ∫ f(λ) dλ</code><br>
+        where <code>f(λ) = N(λ) / N_total</code> is the normalised LED shape
+        and <code>ε(λ) = ε_562 · A(λ)/A(562)</code></td>
+    <td>Flux-weighted average QY:<br>
+        <code>QY_eff = ∫ f(λ) · QY(λ) dλ / ∫ f(λ) dλ</code></td>
+  </tr>
+</table>
+
+<div class="note">
+<b>Physical meaning of ε_eff:</b>
+In <em>scalar</em> mode, ε_eff is simply the molar absorption coefficient of the
+actinometer at the representative wavelength λ_eff.  In <em>spectral</em> mode it
+is the photon-flux-weighted mean of ε(λ) across the LED band — the effective
+single-wavelength ε that would produce the same absorbed flux if the LED were
+monochromatic.  Both definitions rely on the Beer–Lambert ratio
+A(λ)/A(562) to extrapolate from the known reference ε_562.
+</div>
+
+<h2>Step 3 — Rate Function and Linear Fit</h2>
+<p>
+The actinometer ODE (one absorbing species, no back-reaction) can be integrated
+analytically.  Define:
+</p>
+<pre class="eq">y(t) = −V / (QY_eff · ε_eff · l) · [log₁₀(10^A(t) − 1) − log₁₀(10^A₀ − 1)]</pre>
+<p>
+where A(t) is the measured absorbance at λ_eff (or the kinetic channel closest to it).
+The derivation shows that y(t) is exactly linear in time:
+</p>
+<pre class="eq">y(t) = N_chem · t + intercept</pre>
+<p>
+The slope of a linear fit to the (t, y) data gives N_chem in mol s⁻¹ directly.
+</p>
+
+<div class="note">
+<b>Why is y linear?</b>
+The integral ∫ dA / (1 − 10^(−A)) = log₁₀(10^A − 1) + const, so the transformed
+variable y absorbs the nonlinear Beer–Lambert correction factor exactly.  The result
+is valid for <em>any</em> absorbance level, not just the optically thin limit.
+</div>
+
+<h2>Step 4 — N_chem vs N_LED Comparison</h2>
+<p>
+The result table shows N_chem (from the actinometer fit), N_LED (from the LED
+characterisation panel), and the percentage deviation:
+</p>
+<pre class="eq">deviation (%) = (N_chem − N_LED) / N_LED × 100</pre>
+<p>
+A deviation of ±5 % is typical for careful measurements.  Larger deviations may
+indicate:
+</p>
+<ul>
+  <li>LED warm-up drift (measure power immediately before and after the experiment)</li>
+  <li>Beam geometry mismatch between power-meter probe and cuvette cross-section</li>
+  <li>Actinometer absorbance outside the recommended range for the chosen actinometer</li>
+  <li>Inner-filter or photobleaching effects in the actinometer</li>
+</ul>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_LED["LED QY — Calculation Pipeline"] = f"""
+<h1>LED Quantum Yield — Calculation Pipeline</h1>
+
+<p>
+When the photon source is an LED, the QY calculation can be run in two modes:
+<em>scalar</em> (single effective wavelength) or <em>full spectral integration</em>.
+This section describes both, explains the units throughout, and lists the most
+common sources of systematic error.
+</p>
+
+<h2>1. Photon Flux Array N(λ)</h2>
+<p>
+The LED spectrum CSV (saved by the LED Characterisation panel) contains two columns:
+</p>
+<pre>wavelength_nm   N_mol_s_per_nm
+   …                   …</pre>
+<p>
+<code>N_mol_s_per_nm</code> is the <b>spectral photon flux density</b> in mol s⁻¹ nm⁻¹.
+It is computed from the measured LED emission shape I(λ) and total optical power P:
+</p>
+<pre class="eq">N(λ)  =  P · [I(λ) / ∫I(λ) dλ] · λ / (h · c · N_A)    [mol s⁻¹ nm⁻¹]
+
+N_total  =  ∫ N(λ) dλ    [mol s⁻¹]</pre>
+<p>
+The first factor <code>I(λ)/∫I dλ</code> is the normalised emission shape (nm⁻¹).
+The factor <code>λ/(h·c·N_A)</code> converts energy flux at wavelength λ into photon flux.
+</p>
+
+<div class="note">
+<b>Assumption:</b> The emission spectrum I(λ) is proportional to the spectral power
+density P(λ) (i.e. the spectrometer response is flat across the LED band).  For a
+narrowband LED (&lt;30 nm FWHM) this approximation introduces &lt;1% error.
+</div>
+
+<h2>2. Scalar Mode</h2>
+<p>
+In scalar mode the LED is treated as monochromatic at λ_eff:
+</p>
+<pre class="eq">λ_eff = ∫ λ · N(λ) dλ / N_total    (flux-weighted mean wavelength)</pre>
+<p>
+The standard single-wavelength ODE is used with N = N_total and
+ε_A = ε_A(λ_eff), ε_B = ε_B(λ_eff).  This is an approximation: it
+is accurate only when ε(λ) is nearly constant across the LED emission band.
+</p>
+
+<h2>3. Full Spectral Integration Mode</h2>
+<p>
+In full integration mode the ODE integrates photon absorption at each wavelength
+simultaneously:
+</p>
+<pre class="eq">d[A]/dt = ∫ (N(λ)/V) · l · f(A_tot(λ)) · (Φ_BA·[B]·ε_B(λ) − Φ_AB·[A]·ε_A(λ)) dλ
+           + k_th · [B]
+
+A_tot(λ) = (ε_A(λ)·[A] + ε_B(λ)·[B]) · l
+
+f(A_tot) = (1 − 10^(−A_tot)) / A_tot    [absorption correction factor]</pre>
+<p>
+The integral is evaluated by <code>numpy.trapezoid</code> at each ODE time step.
+ε_A(λ) and ε_B(λ) must be provided as full spectra covering the LED emission band
+(loaded from the Extinction Coefficient or Spectra results).
+</p>
+
+<h2>4. Units Verification</h2>
+<table>
+  <tr><th>Quantity</th><th>Symbol</th><th>Unit</th></tr>
+  <tr><td>Spectral photon flux density</td><td>N(λ)</td><td>mol s⁻¹ nm⁻¹</td></tr>
+  <tr><td>Sample volume</td><td>V</td><td>L</td></tr>
+  <tr><td>Path length</td><td>l</td><td>cm</td></tr>
+  <tr><td>Molar absorption coeff.</td><td>ε</td><td>L mol⁻¹ cm⁻¹</td></tr>
+  <tr><td>Concentration</td><td>[A], [B]</td><td>mol L⁻¹</td></tr>
+  <tr><td>Rate (integrand per nm)</td><td>rate(λ) dλ</td><td>mol L⁻¹ s⁻¹ nm⁻¹ × nm</td></tr>
+  <tr><td>d[A]/dt</td><td></td><td>mol L⁻¹ s⁻¹ ✓</td></tr>
+</table>
+<p>
+Dimensional check of the integrand:
+(mol s⁻¹ nm⁻¹ / L) × cm × (L mol⁻¹ cm⁻¹) × (mol L⁻¹) = mol s⁻¹ nm⁻¹ L⁻¹ → after ∫dλ: mol s⁻¹ L⁻¹ ✓
+</p>
+
+<h2>5. Initial Concentration [A]₀</h2>
+<p>
+[A]₀ is derived from the first absorbance data point at the first monitoring
+wavelength:
+</p>
+<pre class="eq">[A]₀ = A_obs(t₀, λ_mon1) / (ε_A(λ_mon1) · l)</pre>
+<p>
+Note that ε here is at the <em>monitoring</em> wavelength, not the irradiation
+wavelength.  This is correct: the monitored absorbance is converted to concentration
+using the monitoring-wavelength ε.
+</p>
+
+<div class="warn">
+<b>Critical: offset correction and [A]₀</b><br>
+If the kinetic trace was zeroed by the spectrophotometer (autozero), A_obs(t₀) = 0
+and the formula above gives [A]₀ = 0 — which is completely wrong.
+Use <code>align_to_spectrum</code> offset correction to shift the kinetic trace to
+the absolute absorbance scale before [A]₀ is computed.
+</div>
+
+<h2>6. ODE Fit and QY Extraction</h2>
+<p>
+The ODE is integrated by <code>scipy.integrate.odeint</code>.  The simulated
+absorbance at each monitoring wavelength is:
+</p>
+<pre class="eq">A_sim(t, λ_mon) = (ε_A(λ_mon)·[A](t) + ε_B(λ_mon)·[B](t)) · l</pre>
+<p>
+<code>lmfit</code> (Levenberg–Marquardt) minimises the sum of squared residuals
+between A_sim and A_exp over Φ_AB (and Φ_BA in the AB_both case).
+</p>
+
+<h2>7. Troubleshooting — Systematic Errors</h2>
+
+<table>
+  <tr><th>Symptom</th><th>Most likely cause</th><th>How to check</th></tr>
+  <tr>
+    <td>Φ 2–5× too high</td>
+    <td><b>Sample volume V entered incorrectly.</b>
+        If V is entered as 4× the true irradiated volume, the computed rate per
+        unit volume is 4× too small, so the fitted Φ will be 4× too large to
+        compensate.  The ODE rate is proportional to N/V; V cancels with [A]₀
+        only partially, so errors in V propagate directly into Φ.</td>
+    <td>Confirm the entered volume matches the actual irradiated cuvette volume,
+        not the total cell volume.  For a standard 1 cm cuvette with 3 mL total
+        but a 1 mL irradiated zone, use 1 mL.</td>
+  </tr>
+  <tr>
+    <td>N_chem 10–20% from N_LED</td>
+    <td>Power meter calibration, beam geometry, or LED drift.
+        This is normal; the power meter absolute accuracy is typically ±5–15%.</td>
+    <td>Use N_chem from actinometry (not N_LED) as input to the QY calculation
+        for a self-consistent result.</td>
+  </tr>
+  <tr>
+    <td>Φ depends strongly on monitoring wavelength</td>
+    <td>Incorrect ε_B at monitoring wavelength; or the data is not well described
+        by the two-species model (photoproduct accumulation, secondary reactions).</td>
+    <td>Check ε_B at each λ_mon.  Run with <code>A_only</code> case and compare.</td>
+  </tr>
+  <tr>
+    <td>[A]₀ = 0 or near zero</td>
+    <td>Kinetic trace was zeroed by the spectrophotometer (autozero) but no
+        offset correction was applied.</td>
+    <td>Use <code>align_to_spectrum</code> correction with an initial spectrum file.</td>
+  </tr>
+  <tr>
+    <td>Φ &gt; 1 (unconstrained fit)</td>
+    <td>Systematic overestimation of Φ.  See Volume above.  Also check: Is N
+        in mol s⁻¹ (not mol s⁻¹ nm⁻¹ total)?  Is ε in L mol⁻¹ cm⁻¹?</td>
+    <td>Enable unconstrained fit to see the true optimum; diagnose the parameter
+        causing the issue.</td>
+  </tr>
+</table>
+
+<div class="note">
+<b>Recommendation for LED experiments:</b>
+Use the LED full-integration mode with N(λ) from the LED Characterisation panel
+and ε(λ) full spectra from the Extinction Coefficient tab.  Set the photon flux
+source to <code>actinometry</code> (using N_chem) rather than <code>led_spectrum</code>
+(using N_LED) to absorb any power-meter calibration offset into the actinometry step,
+where it can be validated against literature QY values for the actinometer.
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 _SECTIONS["Data Types & File Formats"] = f"""
 <h1>Data Types and File Formats</h1>
 
@@ -882,18 +1160,21 @@ class HandbookTab(QWidget):
         font = QFont("Segoe UI", 9)
         self._nav.setFont(font)
 
-        # Group heading
-        heading = QListWidgetItem("  QUANTUM YIELD")
-        heading.setFlags(Qt.ItemFlag.NoItemFlags)
         heading_font = QFont("Segoe UI", 8)
         heading_font.setBold(True)
-        heading.setFont(heading_font)
-        self._nav.addItem(heading)
 
-        for title in _SECTIONS:
-            item = QListWidgetItem(f"   {title}")
-            item.setData(Qt.ItemDataRole.UserRole, title)
-            self._nav.addItem(item)
+        def _add_group(label: str, sections: dict):
+            h = QListWidgetItem(f"  {label}")
+            h.setFlags(Qt.ItemFlag.NoItemFlags)
+            h.setFont(heading_font)
+            self._nav.addItem(h)
+            for title in sections:
+                item = QListWidgetItem(f"   {title}")
+                item.setData(Qt.ItemDataRole.UserRole, title)
+                self._nav.addItem(item)
+
+        _add_group("QUANTUM YIELD", _SECTIONS)
+        _add_group("LED / ACTINOMETRY", _SECTIONS_LED)
 
         self._nav.currentItemChanged.connect(self._on_nav_changed)
 
@@ -951,7 +1232,10 @@ class HandbookTab(QWidget):
         if current is None:
             return
         key = current.data(Qt.ItemDataRole.UserRole)
-        if key and key in _SECTIONS:
-            html = f"<html><body>{_SECTIONS[key]}</body></html>"
+        if not key:
+            return
+        content = _SECTIONS.get(key) or _SECTIONS_LED.get(key)
+        if content:
+            html = f"<html><body>{content}</body></html>"
             self._browser.setHtml(html)
             self._browser.verticalScrollBar().setValue(0)

@@ -415,9 +415,9 @@ class QYParams:
     scans_per_group:  int   = 1
     first_cycle_off:  bool  = False
 
-    # ── Baseline correction ──────────────────────────────────────────────────
-    # "none" | "first_point" | "plateau" | "file"
-    baseline_correction:         str            = "first_point"
+    # ── Offset correction ────────────────────────────────────────────────────
+    # "none" | "subtract_first_point" | "subtract_plateau" | "align_to_spectrum"
+    baseline_correction:         str            = "subtract_first_point"
     baseline_file:               Optional[Path] = None
     offset_plateau_duration_s:   Optional[float] = 20.0
     baseline_plateau_start_s:    Optional[float] = None
@@ -466,6 +466,8 @@ class QYFileResult:
     k_th:            float
     eps_A_irr:       float
     eps_B_irr:       float
+    eps_A_mon:       np.ndarray      # ε_A at each monitoring wavelength (L mol⁻¹ cm⁻¹)
+    eps_B_mon:       np.ndarray      # ε_B at each monitoring wavelength
     conc_A_0:        float
     V_L:             float
     path_length_cm:  float
@@ -788,12 +790,12 @@ def run_qy_file(
     baseline_values   = np.zeros(len(mon_wls))
     initial_spec_abs  = None
 
-    if params.baseline_correction == "first_point":
+    if params.baseline_correction == "subtract_first_point":
         baseline_values = abs_data[0, :].copy()
         abs_data = abs_data - baseline_values[np.newaxis, :]
-        print("  Baseline: first point subtracted.")
+        print("  Offset correction: first point subtracted.")
 
-    elif params.baseline_correction == "plateau":
+    elif params.baseline_correction == "subtract_plateau":
         t_lo = (params.baseline_plateau_start_s
                 if params.baseline_plateau_start_s is not None else time_s[0])
         t_hi = (params.baseline_plateau_end_s
@@ -803,15 +805,15 @@ def run_qy_file(
         mask_p = (time_s >= t_lo) & (time_s <= t_hi)
         if not mask_p.any():
             raise ValueError(
-                f"Baseline plateau [{t_lo}, {t_hi}] s contains no data points.")
+                f"Offset plateau [{t_lo}, {t_hi}] s contains no data points.")
         baseline_values = abs_data[mask_p, :].mean(axis=0)
         abs_data = abs_data - baseline_values[np.newaxis, :]
-        print(f"  Baseline: plateau mean over {t_lo:.1f}–{t_hi:.1f} s.")
+        print(f"  Offset correction: plateau mean over {t_lo:.1f}–{t_hi:.1f} s.")
 
-    elif params.baseline_correction == "file":
+    elif params.baseline_correction == "align_to_spectrum":
         if params.baseline_file is None or not params.baseline_file.exists():
             raise FileNotFoundError(
-                "Baseline correction = 'file' but no initial spectrum file set.")
+                "Offset correction = 'align_to_spectrum' but no initial spectrum file set.")
         init_scans = load_spectra_csv(params.baseline_file)
         init_abs = np.zeros(len(mon_wls))
         init_n   = np.zeros(len(mon_wls), dtype=int)
@@ -906,6 +908,17 @@ def run_qy_file(
                     and params.led_integration_mode == "full"
                     and led_eps_A_arr is not None and led_eps_B_arr is not None)
 
+    # ── Diagnostic summary ────────────────────────────────────────────────────
+    print(f"  --- QY inputs ---")
+    print(f"  N         = {N_mol_s:.4e} mol s⁻¹")
+    print(f"  V         = {V_L*1000:.3f} mL  ({V_L:.4e} L)")
+    print(f"  l         = {params.path_length_cm:.3f} cm")
+    print(f"  ε_A_irr   = {eps_A_irr:.4e} L mol⁻¹ cm⁻¹  (at irr wl = {params.irradiation_wavelength_nm:.1f} nm)")
+    print(f"  ε_B_irr   = {eps_B_irr:.4e} L mol⁻¹ cm⁻¹")
+    if len(mon_wls) > 0:
+        print(f"  ε_A_mon   = {eps_A_mon[0]:.4e} L mol⁻¹ cm⁻¹  (at mon wl = {mon_wls[0]:.1f} nm)")
+    print(f"  k_th      = {k_th:.4e} s⁻¹")
+
     # ── Initial conditions ────────────────────────────────────────────────────
     if params.initial_conc_source == "absorbance":
         if initial_spec_abs is not None:
@@ -914,7 +927,7 @@ def run_qy_file(
             A0 = abs_data_fit[0, 0] + baseline_values[0]
         conc_A_0 = A0 / (eps_A_mon[0] * params.path_length_cm)
         conc_B_0 = 0.0
-        print(f"  [A]₀ = {conc_A_0:.4e} mol L⁻¹ (from absorbance)")
+        print(f"  A₀_mon    = {A0:.4f}  →  [A]₀ = {conc_A_0:.4e} mol L⁻¹")
     elif params.initial_conc_source == "manual":
         if params.initial_conc_A_manual is None:
             raise ValueError("initial_conc_source = 'manual' but initial_conc_A_manual is None.")
@@ -981,6 +994,7 @@ def run_qy_file(
             case=params.case, mon_wls=mon_wls,
             N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
             k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
+            eps_A_mon=eps_A_mon, eps_B_mon=eps_B_mon,
             conc_A_0=conc_A_0, V_L=V_L, path_length_cm=params.path_length_cm,
             temperature_C=params.temperature_C, solvent=params.solvent,
             QY_AB_per_wl=[QY_AB_nom], QY_BA_per_wl=[0.0],
@@ -1147,6 +1161,7 @@ def run_qy_file(
         case=params.case, mon_wls=mon_wls,
         N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
         k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
+        eps_A_mon=eps_A_mon, eps_B_mon=eps_B_mon,
         conc_A_0=conc_A_0, V_L=V_L, path_length_cm=params.path_length_cm,
         temperature_C=params.temperature_C, solvent=params.solvent,
         QY_AB_per_wl=QY_AB_per_wl, QY_BA_per_wl=QY_BA_per_wl,
@@ -1274,10 +1289,24 @@ def plot_qy_result(result: QYFileResult) -> Figure:
     ax_res.grid(True, alpha=0.4)
 
     # Concentrations panel
+    # [A] and [B] are recovered from the measured absorbance using the two-species
+    # Beer-Lambert equation and mass balance [A] + [B] = [A]₀:
+    #   A_meas = (ε_A·[A] + ε_B·[B]) · l = ((ε_A − ε_B)·[A] + ε_B·[A]₀) · l
+    #   → [A] = (A_meas/l − ε_B·[A]₀) / (ε_A − ε_B)   when ε_A ≠ ε_B
+    #   → [A] = A_meas / (ε_A · l)                       at isosbestic (ε_A = ε_B)
     ax_conc = axes[n_mon + 1]
+    l = result.path_length_cm
     for j, wl_nm in enumerate(result.mon_wls):
-        A_obs = result.abs_data[:, j] / (
-            (result.eps_A_irr or 1.0) * result.path_length_cm) * 1000
+        eA = float(result.eps_A_mon[j])
+        eB = float(result.eps_B_mon[j])
+        A_meas = result.abs_data[:, j]
+        if abs(eA - eB) > 1e-6 * max(abs(eA), abs(eB), 1.0):
+            # Full two-species inversion: A = (A_meas/l − ε_B·[A]₀) / (ε_A − ε_B)
+            A_obs = (A_meas / l - eB * result.conc_A_0) / (eA - eB) * 1000
+        else:
+            # ε_A ≈ ε_B (near isosbestic) or ε_B = 0 (A_only):
+            # assume only A contributes — [A] = A_meas / (ε_A · l)
+            A_obs = A_meas / (max(eA, 1.0) * l) * 1000
         B_obs = result.conc_A_0 * 1000 - A_obs
         ax_conc.plot(result.time_s, A_obs, ".", markersize=3, alpha=0.5,
                      label=f"[A] obs {wl_nm:.0f} nm")
