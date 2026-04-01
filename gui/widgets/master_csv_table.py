@@ -10,12 +10,12 @@ from PyQt6.QtGui import QColor
 
 # Canonical column order for half_life_master.csv
 COLUMNS = [
-    "File", "Wavelength", "Type", "Temperature_C",
+    "File", "Segment", "Wavelength", "Type", "Temperature_C",
     "Switch", "A0", "A_inf", "k", "Half_life_s", "R2",
 ]
 
 _HEADER_LABELS = [
-    "File", "Wavelength", "Type", "T (°C)",
+    "File", "Segment", "Wavelength", "Type", "T (°C)",
     "Switch", "A₀", "A∞", "k (s⁻¹)", "t½ (s)", "R²",
 ]
 

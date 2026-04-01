@@ -75,6 +75,7 @@ class KineticsPanel(QWidget):
         self._worker:     Worker | None = None
         self._output_path: Path | None  = None
         self._raw_path:    Path | None  = None
+        self._last_results: list = []     # FitResult objects from last fit run
         self._segments:   list  = []      # [(t_start, t_end), ...]
         self._seg_idx:    int   = 0
         self._build_ui()
@@ -161,6 +162,17 @@ class KineticsPanel(QWidget):
             min_height=300,
         )
         card.add_widget(self._k_raw_plot)
+
+        # ── Publication mode ───────────────────────────────────────────────
+        pub_row = QHBoxLayout()
+        self._k_pub_chk = QCheckBox("Save for publication")
+        self._k_pub_chk.setToolTip(
+            "When enabled, manual save buttons appear to export data\n"
+            "into a publication/ subfolder for the Publication Composer.")
+        self._k_pub_chk.toggled.connect(self._k_pub_mode_changed)
+        pub_row.addWidget(self._k_pub_chk)
+        pub_row.addStretch()
+        card.add_layout(pub_row)
 
         return card
 
@@ -291,6 +303,7 @@ class KineticsPanel(QWidget):
         self._k_t_start.setRange(0, 1e9)
         self._k_t_start.setDecimals(1)
         self._k_t_start.setSuffix(" s")
+        self._k_t_start.valueChanged.connect(self._k_update_current_segment)
         self._k_t_start.valueChanged.connect(self._k_update_raw_plot)
         self._k_t_start.valueChanged.connect(self._k_mark_stale)
         row.addWidget(self._k_t_start)
@@ -307,11 +320,43 @@ class KineticsPanel(QWidget):
         self._k_t_end.setRange(0, 1e9)
         self._k_t_end.setDecimals(1)
         self._k_t_end.setSuffix(" s")
+        self._k_t_end.valueChanged.connect(self._k_update_current_segment)
         self._k_t_end.valueChanged.connect(self._k_update_raw_plot)
         self._k_t_end.valueChanged.connect(self._k_mark_stale)
         row2.addWidget(self._k_t_end)
         row2.addStretch()
         card.add_layout(row2)
+
+        # ── Manual segments ────────────────────────────────────────────────
+        card.add_widget(_sep())
+        man_row = QHBoxLayout()
+        man_lbl = QLabel("Manual segments:")
+        man_lbl.setObjectName("pref_label")
+        man_row.addWidget(man_lbl)
+        man_row.addWidget(InfoButton(
+            "Manual segments",
+            "Divide the time range into N equal segments to fit separately.\n\n"
+            "After setting the count the current Start / End values are split "
+            "evenly. Use ← / → to navigate between segments and adjust each "
+            "one's Start / End times — edits are stored per segment.\n\n"
+            "All segments are shown simultaneously in the raw-data plot above: "
+            "the active segment is highlighted, others are shown faintly.",
+        ))
+        self._k_n_manual_segs = QSpinBox()
+        self._k_n_manual_segs.setRange(1, 20)
+        self._k_n_manual_segs.setValue(1)
+        self._k_n_manual_segs.setFixedWidth(60)
+        self._k_n_manual_segs.setToolTip("Number of fitting segments (1 = single window)")
+        self._k_n_manual_segs.valueChanged.connect(self._k_manual_segments_init)
+        man_row.addWidget(self._k_n_manual_segs)
+        man_row.addStretch()
+        card.add_layout(man_row)
+
+        # Publication save button (hidden until pub mode on)
+        self._k_pub_save_raw_btn = QPushButton("Save raw + segments for publication")
+        self._k_pub_save_raw_btn.setVisible(False)
+        self._k_pub_save_raw_btn.clicked.connect(self._k_save_pub_raw)
+        card.add_widget(self._k_pub_save_raw_btn)
 
         return card
 
@@ -374,6 +419,130 @@ class KineticsPanel(QWidget):
         if self._seg_idx < len(self._segments) - 1:
             self._seg_idx += 1
             self._k_apply_segment(self._seg_idx)
+
+    def _k_manual_segments_init(self):
+        """Split current Start–End range into N equal segments."""
+        n = self._k_n_manual_segs.value()
+        t0 = self._k_t_start.value()
+        t1 = self._k_t_end.value()
+        if t1 <= t0 or not self._channels:
+            return
+        step = (t1 - t0) / n
+        self._segments = [(t0 + i * step, t0 + (i + 1) * step) for i in range(n)]
+        self._seg_idx = 0
+        # Clear any auto-detect status text to avoid confusion
+        self._k_detect_lbl.setText("")
+        self._k_seg_nav.setVisible(n > 1)
+        self._k_apply_segment(0)
+
+    def _k_update_current_segment(self):
+        """Sync spinbox values back into the active segment entry."""
+        if not self._segments or not (0 <= self._seg_idx < len(self._segments)):
+            return
+        t_start = self._k_t_start.value()
+        t_end   = self._k_t_end.value()
+        self._segments[self._seg_idx] = (t_start, t_end)
+        self._k_seg_lbl.setText(
+            f"Segment {self._seg_idx + 1} / {len(self._segments)}  "
+            f"({t_start:.1f} – {t_end:.1f} s)"
+        )
+
+    def _k_seg_label(self) -> str:
+        """Return e.g. 'Seg1 (0–120 s)' for the current segment."""
+        if self._segments and 0 <= self._seg_idx < len(self._segments):
+            t0, t1 = self._segments[self._seg_idx]
+            return f"Seg{self._seg_idx + 1} ({t0:.0f}–{t1:.0f} s)"
+        return "–"
+
+    # ── Publication helpers ────────────────────────────────────────────────
+
+    def _k_pub_folder(self) -> "Path | None":
+        if self._output_path is None:
+            return None
+        return self._output_path / "half_life" / "results" / "publication"
+
+    def _k_pub_mode_changed(self, checked: bool):
+        self._k_pub_save_raw_btn.setVisible(checked)
+        self._k_pub_save_seg_btn.setVisible(checked)
+        if checked:
+            pub = self._k_pub_folder()
+            if pub is not None:
+                pub.mkdir(parents=True, exist_ok=True)
+
+    def _k_save_pub_raw(self):
+        """Save raw_data.csv and segments.csv into publication/raw/."""
+        import pandas as pd
+        pub = self._k_pub_folder()
+        if pub is None:
+            return
+        active = [lbl for lbl, cb in self._k_checkboxes.items() if cb.isChecked()]
+        if not active or not self._channels:
+            return
+        raw_dir = pub / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        # raw_data.csv
+        data: dict = {}
+        for label in active:
+            time, absorbance = self._channels[label]
+            if "time_s" not in data:
+                data["time_s"] = time
+            data[label] = absorbance
+        pd.DataFrame(data).to_csv(raw_dir / "raw_data.csv", index=False)
+        # segments.csv
+        if self._segments:
+            rows = [
+                {"segment": i + 1, "t_start_s": s0, "t_end_s": s1,
+                 "label": f"Seg{i+1} ({s0:.0f}–{s1:.0f} s)"}
+                for i, (s0, s1) in enumerate(self._segments)
+            ]
+            pd.DataFrame(rows).to_csv(raw_dir / "segments.csv", index=False)
+        print(f"Publication raw data → {raw_dir}")
+
+    def _k_save_pub_segment(self):
+        """Save data_points.csv, fit_line.csv, fit_params.csv for current segment."""
+        import pandas as pd
+        pub = self._k_pub_folder()
+        if pub is None or not self._last_results:
+            return
+        n = self._seg_idx + 1
+        seg_dir = pub / f"segment_{n}"
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        data_cols: dict = {}
+        fit_cols: dict  = {}
+        params_rows: list = []
+        for r in self._last_results:
+            if not r.success:
+                continue
+            popt   = r.popt
+            switch = r.switch
+            if switch == "negative":
+                a_inf = float(popt[1]); a0 = float(popt[0]); k = float(popt[2])
+                ln_data = np.log(np.maximum(r.abs_clean - a_inf, 1e-20))
+                t_dense = np.linspace(r.time_clean[0], r.time_clean[-1], 300)
+                ln_fit  = np.log(abs(a0 - a_inf)) - k * (t_dense - r.time_clean[0])
+            else:
+                a0 = float(popt[0]); k = float(popt[1]); a_inf = 0.0
+                ln_data = np.log(np.maximum(r.abs_clean, 1e-20))
+                t_dense = np.linspace(r.time_clean[0], r.time_clean[-1], 300)
+                ln_fit  = np.log(abs(a0)) - k * (t_dense - r.time_clean[0])
+            if "time_s" not in data_cols:
+                data_cols["time_s"] = r.time_clean
+            if "time_s" not in fit_cols:
+                fit_cols["time_s"] = t_dense
+            data_cols[f"{r.label}_abs"]  = r.abs_clean
+            data_cols[f"{r.label}_ln_A"] = ln_data
+            fit_cols[f"{r.label}_fit"]   = ln_fit
+            params_rows.append({
+                "channel": r.label, "k_s-1": k, "t_half_s": r.t_half,
+                "A0": a0, "A_inf": a_inf, "R2": r.r2,
+            })
+        if data_cols:
+            pd.DataFrame(data_cols).to_csv(seg_dir / "data_points.csv", index=False)
+        if fit_cols:
+            pd.DataFrame(fit_cols).to_csv(seg_dir / "fit_line.csv", index=False)
+        if params_rows:
+            pd.DataFrame(params_rows).to_csv(seg_dir / "fit_params.csv", index=False)
+        print(f"Publication segment {n} → {seg_dir}")
 
     # ── Stage 4: Fit parameters ────────────────────────────────────────────
 
@@ -472,6 +641,11 @@ class KineticsPanel(QWidget):
         self._k_run_btn.setFixedHeight(34)
         self._k_run_btn.clicked.connect(self._k_run_fit)
         run_row.addWidget(self._k_run_btn)
+        self._k_pub_save_seg_btn = QPushButton("Save segment fit for publication")
+        self._k_pub_save_seg_btn.setVisible(False)
+        self._k_pub_save_seg_btn.setEnabled(False)
+        self._k_pub_save_seg_btn.clicked.connect(self._k_save_pub_segment)
+        run_row.addWidget(self._k_pub_save_seg_btn)
         run_row.addStretch()
         card.add_layout(run_row)
 
@@ -593,7 +767,25 @@ class KineticsPanel(QWidget):
                         markersize=3, markerfacecolor="none",
                         markeredgewidth=0.8, label=label)
 
-        if t_end > t_start:
+        # Draw segment highlights
+        if len(self._segments) > 1:
+            for i, (s0, s1) in enumerate(self._segments):
+                if s1 <= s0:
+                    continue
+                is_active = (i == self._seg_idx)
+                ax.axvspan(s0, s1, color="#e8a020",
+                           alpha=0.22 if is_active else 0.07,
+                           label="Active segment" if is_active else None)
+                ax.text((s0 + s1) / 2, 1.0, str(i + 1),
+                        transform=ax.get_xaxis_transform(),
+                        ha="center", va="top", fontsize=8,
+                        color="#b06010" if is_active else "#c09040",
+                        fontweight="bold" if is_active else "normal")
+        elif self._segments:
+            s0, s1 = self._segments[0]
+            if s1 > s0:
+                ax.axvspan(s0, s1, color="#e8a020", alpha=0.12, label="Selection window")
+        elif t_end > t_start:
             ax.axvspan(t_start, t_end, color="#e8a020", alpha=0.12, label="Selection window")
 
         ax.set_xlabel("Time (s)")
@@ -714,6 +906,7 @@ class KineticsPanel(QWidget):
             popt = r.popt
             result_entries.append({
                 "File":          Path(self._k_file_edit.text()).name,
+                "Segment":       self._k_seg_label(),
                 "Wavelength":    r.label,
                 "Type":          "Kinetics",
                 "Temperature_C": r.temperature_c,
@@ -725,8 +918,11 @@ class KineticsPanel(QWidget):
                 "R2":            r.r2,
             })
 
+        self._last_results = results
         if result_entries:
             self._k_master.add_pending(result_entries)
+        if self._k_pub_chk.isChecked() and result_entries:
+            self._k_pub_save_seg_btn.setEnabled(True)
 
     @pyqtSlot(str)
     def _k_on_fit_error(self, msg: str):
@@ -1412,6 +1608,488 @@ class ScanningKineticsPanel(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Publication Composer panel
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _RawFileEntry(QWidget):
+    """One browseable raw-data + segments pair for the raw subplot."""
+
+    removed = pyqtSignal(object)
+    changed = pyqtSignal()
+
+    def __init__(self, idx: int, parent=None):
+        super().__init__(parent)
+        self._idx = idx
+        self.raw_path: "Path | None" = None
+        self.seg_path: "Path | None" = None
+        self._build()
+
+    def _build(self):
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(6)
+        row.addWidget(QLabel(f"File {self._idx + 1}:"))
+        self._raw_edit = QLineEdit()
+        self._raw_edit.setReadOnly(True)
+        self._raw_edit.setPlaceholderText("raw_data.csv…")
+        row.addWidget(self._raw_edit)
+        btn_raw = QPushButton("Browse…")
+        btn_raw.setFixedWidth(72)
+        btn_raw.clicked.connect(self._browse_raw)
+        row.addWidget(btn_raw)
+        row.addWidget(QLabel("Segments:"))
+        self._seg_edit = QLineEdit()
+        self._seg_edit.setReadOnly(True)
+        self._seg_edit.setPlaceholderText("segments.csv (optional)…")
+        row.addWidget(self._seg_edit)
+        btn_seg = QPushButton("Browse…")
+        btn_seg.setFixedWidth(72)
+        btn_seg.clicked.connect(self._browse_seg)
+        row.addWidget(btn_seg)
+        btn_rm = QPushButton("✕")
+        btn_rm.setObjectName("delete_row_btn")
+        btn_rm.setFixedWidth(28)
+        btn_rm.clicked.connect(lambda: self.removed.emit(self))
+        row.addWidget(btn_rm)
+
+    def _browse_raw(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select raw_data.csv", "", "CSV files (*.csv)")
+        if path:
+            self.raw_path = Path(path)
+            self._raw_edit.setText(Path(path).name)
+            self.changed.emit()
+
+    def _browse_seg(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select segments.csv", "", "CSV files (*.csv)")
+        if path:
+            self.seg_path = Path(path)
+            self._seg_edit.setText(Path(path).name)
+            self.changed.emit()
+
+    def auto_fill_from_folder(self, folder: Path):
+        raw = folder / "raw_data.csv"
+        seg = folder / "segments.csv"
+        if raw.exists():
+            self.raw_path = raw
+            self._raw_edit.setText(raw.name)
+        if seg.exists():
+            self.seg_path = seg
+            self._seg_edit.setText(seg.name)
+        self.changed.emit()
+
+
+class PublicationPanel(QWidget):
+    """
+    Five-stage pipeline for assembling the 4-panel publication figure.
+
+    Subplot layout:
+      [Raw traces + segments] | [Segment 1 – linearised + fit]
+      [Segment 2             ] | [Segment 3                   ]
+    """
+
+    log_signal = pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pub_folder: "Path | None" = None
+        self._raw_entries: list         = []   # list of _RawFileEntry
+        self._seg_folders: list         = [None, None, None]
+        self._seg_edits:   list         = []   # QLineEdit × 3
+        self._build_ui()
+
+    # ── Build ──────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(scroll)
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(0)
+        scroll.setWidget(container)
+
+        self._card1 = self._build_card1_pub()
+        self._card2 = self._build_card2_pub()
+        self._card3 = self._build_card3_pub()
+        self._card4 = self._build_card4_pub()
+        self._card5 = self._build_card5_pub()
+
+        for c in (self._card1, self._card2, self._card3, self._card4, self._card5):
+            lay.addWidget(c)
+        lay.addStretch()
+
+        for c in (self._card2, self._card3, self._card4, self._card5):
+            c.set_card_enabled(False)
+
+    # ── Stage 1: session folder ────────────────────────────────────────────
+
+    def _build_card1_pub(self) -> StageCard:
+        card = StageCard("Stage 1 — Publication folder")
+        card.set_status(READY)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Folder:"))
+        self._pub_folder_edit = QLineEdit()
+        self._pub_folder_edit.setReadOnly(True)
+        self._pub_folder_edit.setPlaceholderText(
+            "…/half_life/results/publication/")
+        row.addWidget(self._pub_folder_edit)
+        btn = QPushButton("Browse…")
+        btn.setFixedWidth(72)
+        btn.clicked.connect(self._browse_pub_folder)
+        row.addWidget(btn)
+        card.add_layout(row)
+        self._pub_folder_lbl = QLabel("")
+        self._pub_folder_lbl.setObjectName("detected_label")
+        card.add_widget(self._pub_folder_lbl)
+        return card
+
+    # ── Stage 2: raw subplot ───────────────────────────────────────────────
+
+    def _build_card2_pub(self) -> StageCard:
+        card = StageCard("Stage 2 — Raw subplot (Subplot 1)")
+        card.add_widget(InfoButton(
+            "Raw subplot",
+            "Add one or more raw kinetics files to overlay in the top-left subplot.\n"
+            "Each entry needs a raw_data.csv and optionally a segments.csv\n"
+            "(both produced by 'Save raw + segments for publication').",
+        ))
+        self._raw_list_widget = QWidget()
+        self._raw_list_layout = QVBoxLayout(self._raw_list_widget)
+        self._raw_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._raw_list_layout.setSpacing(2)
+        card.add_widget(self._raw_list_widget)
+        btn_add = QPushButton("+ Add raw file")
+        btn_add.setFixedWidth(120)
+        btn_add.clicked.connect(self._add_raw_entry)
+        card.add_widget(btn_add)
+        return card
+
+    # ── Stage 3: segment subplots ──────────────────────────────────────────
+
+    def _build_card3_pub(self) -> StageCard:
+        card = StageCard("Stage 3 — Segment subplots (Subplots 2–4)")
+        self._seg_edits = []
+        for i in range(3):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"Subplot {i + 2}  — Segment {i + 1} folder:"))
+            edit = QLineEdit()
+            edit.setReadOnly(True)
+            edit.setPlaceholderText(f"publication/segment_{i + 1}/")
+            row.addWidget(edit)
+            btn = QPushButton("Browse…")
+            btn.setFixedWidth(72)
+            btn.clicked.connect(lambda _, n=i: self._browse_seg_folder(n))
+            row.addWidget(btn)
+            card.add_layout(row)
+            self._seg_edits.append(edit)
+        return card
+
+    # ── Stage 4: preview ──────────────────────────────────────────────────
+
+    def _build_card4_pub(self) -> StageCard:
+        card = StageCard("Stage 4 — Preview")
+        btn_prev = QPushButton("▶  Generate preview")
+        btn_prev.setObjectName("run_btn")
+        btn_prev.setFixedHeight(34)
+        btn_prev.clicked.connect(self._generate_preview)
+        card.add_widget(btn_prev)
+        self._pub_plot = PlotWidget(
+            info_title="Publication figure",
+            info_text=(
+                "Four-panel publication figure.\n"
+                "Top-left: raw traces with segment shading.\n"
+                "Other panels: linearised fits per segment."
+            ),
+            min_height=500,
+        )
+        card.add_widget(self._pub_plot)
+        return card
+
+    # ── Stage 5: export ───────────────────────────────────────────────────
+
+    def _build_card5_pub(self) -> StageCard:
+        card = StageCard("Stage 5 — Export")
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Output file:"))
+        self._pub_out_edit = QLineEdit()
+        self._pub_out_edit.setPlaceholderText("publication_data.xlsx")
+        row.addWidget(self._pub_out_edit)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.setFixedWidth(72)
+        btn_browse.clicked.connect(self._browse_out_file)
+        row.addWidget(btn_browse)
+        card.add_layout(row)
+        btn_exp = QPushButton("💾  Export Excel")
+        btn_exp.setObjectName("accent")
+        btn_exp.setFixedHeight(34)
+        btn_exp.clicked.connect(self._export_excel)
+        card.add_widget(btn_exp)
+        self._pub_exp_lbl = QLabel("")
+        self._pub_exp_lbl.setObjectName("detected_label")
+        card.add_widget(self._pub_exp_lbl)
+        return card
+
+    # ── Stage 1 actions ───────────────────────────────────────────────────
+
+    def _browse_pub_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select publication folder", "")
+        if not folder:
+            return
+        self._pub_folder = Path(folder)
+        self._pub_folder_edit.setText(str(self._pub_folder))
+        self._auto_populate()
+        for c in (self._card2, self._card3, self._card4, self._card5):
+            c.set_card_enabled(True)
+            c.set_status(READY)
+
+    def _auto_populate(self):
+        """Auto-fill from the publication folder structure."""
+        if self._pub_folder is None:
+            return
+        found = []
+        raw_dir = self._pub_folder / "raw"
+        if raw_dir.exists():
+            found.append("raw/")
+            # Auto-add one raw entry
+            if not self._raw_entries:
+                self._add_raw_entry()
+            self._raw_entries[0].auto_fill_from_folder(raw_dir)
+        for i in range(3):
+            seg_dir = self._pub_folder / f"segment_{i + 1}"
+            if seg_dir.exists():
+                found.append(f"segment_{i + 1}/")
+                self._seg_folders[i] = seg_dir
+                self._seg_edits[i].setText(str(seg_dir))
+        # Set default output path
+        default_out = self._pub_folder / "publication_data.xlsx"
+        self._pub_out_edit.setText(str(default_out))
+        self._pub_folder_lbl.setText(
+            f"Found: {', '.join(found) if found else 'nothing yet'}")
+
+    # ── Stage 2 actions ───────────────────────────────────────────────────
+
+    def _add_raw_entry(self):
+        entry = _RawFileEntry(len(self._raw_entries), self)
+        entry.removed.connect(self._remove_raw_entry)
+        self._raw_entries.append(entry)
+        self._raw_list_layout.addWidget(entry)
+
+    def _remove_raw_entry(self, entry):
+        self._raw_entries.remove(entry)
+        self._raw_list_layout.removeWidget(entry)
+        entry.deleteLater()
+        # Re-index labels
+        for i, e in enumerate(self._raw_entries):
+            e._idx = i
+
+    # ── Stage 3 actions ───────────────────────────────────────────────────
+
+    def _browse_seg_folder(self, idx: int):
+        start = str(self._pub_folder) if self._pub_folder else ""
+        folder = QFileDialog.getExistingDirectory(
+            self, f"Select segment {idx + 1} folder", start)
+        if not folder:
+            return
+        self._seg_folders[idx] = Path(folder)
+        self._seg_edits[idx].setText(folder)
+
+    # ── Stage 4 actions ───────────────────────────────────────────────────
+
+    def _generate_preview(self):
+        try:
+            fig = self._build_figure()
+            self._pub_plot.set_figure(fig)
+            plt.close(fig)
+            self._card5.set_card_enabled(True)
+            self._card5.set_status(READY)
+        except Exception as exc:
+            self._card4.set_status(ERROR)
+            print(f"Preview error: {exc}")
+            import traceback; traceback.print_exc()
+
+    def _build_figure(self) -> "plt.Figure":
+        import pandas as pd
+        fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+        fig.patch.set_facecolor("white")
+        ax_raw  = axes[0, 0]
+        ax_segs = [axes[0, 1], axes[1, 0], axes[1, 1]]
+
+        # ── Raw subplot ───────────────────────────────────────────────────
+        ci = 0
+        for entry in self._raw_entries:
+            if entry.raw_path is None or not entry.raw_path.exists():
+                continue
+            df   = pd.read_csv(entry.raw_path)
+            time = df["time_s"].values
+            chs  = [c for c in df.columns if c != "time_s"]
+            for ch in chs:
+                color = _CHANNEL_COLORS[ci % len(_CHANNEL_COLORS)]
+                ci += 1
+                ax_raw.plot(time, df[ch].values, "o", color=color,
+                            markersize=2, alpha=0.7, label=ch)
+            if entry.seg_path and entry.seg_path.exists():
+                seg_df = pd.read_csv(entry.seg_path)
+                for _, srow in seg_df.iterrows():
+                    ax_raw.axvspan(srow["t_start_s"], srow["t_end_s"],
+                                   color="#e8a020", alpha=0.12)
+                    ax_raw.text(
+                        (srow["t_start_s"] + srow["t_end_s"]) / 2, 1.0,
+                        str(int(srow["segment"])),
+                        transform=ax_raw.get_xaxis_transform(),
+                        ha="center", va="top", fontsize=8, color="#b06010")
+        ax_raw.set_xlabel("Time (s)")
+        ax_raw.set_ylabel("Absorbance")
+        ax_raw.set_title("Raw kinetic traces")
+        if ci:
+            ax_raw.legend(fontsize=7)
+        ax_raw.grid(True, alpha=0.3)
+
+        # ── Segment subplots ──────────────────────────────────────────────
+        for ax, folder, seg_lbl in zip(
+                ax_segs,
+                self._seg_folders,
+                ["Segment 1", "Segment 2", "Segment 3"]):
+            ax.set_title(seg_lbl)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("ln(A \u2212 A\u221e)")
+            ax.grid(True, alpha=0.3)
+            if folder is None or not Path(folder).exists():
+                continue
+            folder = Path(folder)
+            data_f   = folder / "data_points.csv"
+            fit_f    = folder / "fit_line.csv"
+            params_f = folder / "fit_params.csv"
+            if not data_f.exists() or not params_f.exists():
+                continue
+            data_df   = pd.read_csv(data_f)
+            fit_df    = pd.read_csv(fit_f)  if fit_f.exists()    else None
+            params_df = pd.read_csv(params_f)
+            channels  = params_df["channel"].tolist()
+            annot_lines = []
+            for j, ch in enumerate(channels):
+                color = _CHANNEL_COLORS[j % len(_CHANNEL_COLORS)]
+                ln_col = f"{ch}_ln_A"
+                if ln_col in data_df.columns:
+                    ax.scatter(data_df["time_s"], data_df[ln_col],
+                               color=color, s=10, alpha=0.75,
+                               label=ch, zorder=3)
+                fit_col = f"{ch}_fit"
+                if fit_df is not None and fit_col in fit_df.columns:
+                    ax.plot(fit_df["time_s"], fit_df[fit_col],
+                            color=color, linewidth=1.5)
+                row_p = params_df[params_df["channel"] == ch]
+                if not row_p.empty:
+                    k_val     = float(row_p["k_s-1"].iloc[0])
+                    a_inf_val = float(row_p["A_inf"].iloc[0])
+                    annot_lines.append(
+                        f"{ch}:  k = {k_val:.3e} s\u207b\u00b9,  "
+                        f"A\u221e = {a_inf_val:.4f}")
+            if annot_lines:
+                ax.text(0.97, 0.97, "\n".join(annot_lines),
+                        transform=ax.transAxes,
+                        ha="right", va="top", fontsize=7.5,
+                        bbox=dict(boxstyle="round,pad=0.4",
+                                  facecolor="white", edgecolor="#cccccc",
+                                  alpha=0.92))
+            if channels:
+                ax.legend(fontsize=7)
+
+        plt.tight_layout()
+        return fig
+
+    # ── Stage 5 actions ───────────────────────────────────────────────────
+
+    def _browse_out_file(self):
+        start = self._pub_out_edit.text() or ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save publication data", start,
+            "Excel files (*.xlsx)")
+        if path:
+            self._pub_out_edit.setText(path)
+
+    def _export_excel(self):
+        import pandas as pd
+        out_text = self._pub_out_edit.text().strip()
+        if not out_text:
+            self._pub_exp_lbl.setText("Set an output file first.")
+            return
+        out_path = Path(out_text)
+        if not out_path.suffix:
+            out_path = out_path.with_suffix(".xlsx")
+        try:
+            writer = pd.ExcelWriter(out_path, engine="openpyxl")
+            # Raw sheet
+            raw_frames = []
+            for entry in self._raw_entries:
+                if entry.raw_path and entry.raw_path.exists():
+                    df = pd.read_csv(entry.raw_path)
+                    prefix = entry.raw_path.parent.name
+                    df = df.rename(columns={
+                        c: (f"{prefix}_{c}" if c != "time_s" else f"{prefix}_time_s")
+                        for c in df.columns})
+                    raw_frames.append(df)
+            if raw_frames:
+                import numpy as np
+                max_len = max(len(f) for f in raw_frames)
+                padded = {}
+                for df in raw_frames:
+                    for col in df.columns:
+                        arr = df[col].values
+                        if len(arr) < max_len:
+                            arr = np.concatenate(
+                                [arr, np.full(max_len - len(arr), np.nan)])
+                        padded[col] = arr
+                pd.DataFrame(padded).to_excel(
+                    writer, sheet_name="Raw", index=False)
+            # Segments sheet
+            for entry in self._raw_entries:
+                if entry.seg_path and entry.seg_path.exists():
+                    pd.read_csv(entry.seg_path).to_excel(
+                        writer, sheet_name="Segments", index=False)
+                    break
+            # Segment data sheets
+            for i, folder in enumerate(self._seg_folders, 1):
+                if folder is None:
+                    continue
+                folder = Path(folder)
+                for fname, sheet in [
+                    ("data_points.csv", f"Segment_{i}_data"),
+                    ("fit_line.csv",    f"Segment_{i}_fit"),
+                    ("fit_params.csv",  f"Segment_{i}_params"),
+                ]:
+                    fpath = folder / fname
+                    if fpath.exists():
+                        pd.read_csv(fpath).to_excel(
+                            writer, sheet_name=sheet, index=False)
+            writer.close()
+            self._pub_exp_lbl.setText(f"Exported → {out_path.name}")
+            self._card5.set_status(DONE)
+            print(f"Publication Excel → {out_path}")
+        except Exception as exc:
+            self._pub_exp_lbl.setText(f"Error: {exc}")
+            self._card5.set_status(ERROR)
+
+    def set_output_path(self, path: Path):
+        """Called by HalfLifeTab when the project output path changes."""
+        default = path / "half_life" / "results" / "publication"
+        if default.exists() and not self._pub_folder:
+            self._pub_folder = default
+            self._pub_folder_edit.setText(str(default))
+            self._auto_populate()
+            for c in (self._card2, self._card3, self._card4, self._card5):
+                c.set_card_enabled(True)
+                c.set_status(READY)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Half-Life Tab  (top-level)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1426,41 +2104,18 @@ class HalfLifeTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Mode selector bar ──────────────────────────────────────────────
-        mode_bar = QWidget()
-        mode_bar.setObjectName("mode_bar")
-        mode_bar.setFixedHeight(44)
-        mode_layout = QHBoxLayout(mode_bar)
-        mode_layout.setContentsMargins(16, 0, 16, 0)
-        mode_layout.setSpacing(24)
+        from PyQt6.QtWidgets import QTabWidget
+        inner = QTabWidget()
+        inner.setObjectName("inner_tabs")
 
-        mode_layout.addWidget(QLabel("Measurement type:"))
+        self._kinetics_panel    = KineticsPanel()
+        self._scanning_panel    = ScanningKineticsPanel()
+        self._publication_panel = PublicationPanel()
+        inner.addTab(self._kinetics_panel,    "Kinetics")
+        inner.addTab(self._scanning_panel,    "Scanning Kinetics")
+        inner.addTab(self._publication_panel, "Publication")
 
-        self._rb_kinetics  = QRadioButton("Kinetics")
-        self._rb_scanning  = QRadioButton("Scanning Kinetics")
-        self._rb_kinetics.setChecked(True)
-        bg = QButtonGroup(self)
-        bg.addButton(self._rb_kinetics)
-        bg.addButton(self._rb_scanning)
-        mode_layout.addWidget(self._rb_kinetics)
-        mode_layout.addWidget(self._rb_scanning)
-        mode_layout.addStretch()
-
-        root.addWidget(mode_bar)
-
-        # ── Stacked panels ─────────────────────────────────────────────────
-        from PyQt6.QtWidgets import QStackedWidget
-        self._stack = QStackedWidget()
-
-        self._kinetics_panel  = KineticsPanel()
-        self._scanning_panel  = ScanningKineticsPanel()
-        self._stack.addWidget(self._kinetics_panel)
-        self._stack.addWidget(self._scanning_panel)
-
-        root.addWidget(self._stack)
-
-        self._rb_kinetics.toggled.connect(
-            lambda on: self._stack.setCurrentIndex(0 if on else 1))
+        root.addWidget(inner)
 
     def set_raw_path(self, path: Path):
         self._kinetics_panel.set_raw_path(path)
@@ -1469,6 +2124,7 @@ class HalfLifeTab(QWidget):
     def set_output_path(self, path: Path):
         self._kinetics_panel.set_output_path(path)
         self._scanning_panel.set_output_path(path)
+        self._publication_panel.set_output_path(path)
 
     def apply_prefs(self, project_prefs):
         """Apply loaded ProjectPrefs to both panels."""
