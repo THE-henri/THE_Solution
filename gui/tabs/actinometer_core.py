@@ -15,7 +15,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
+from scipy.integrate import solve_ivp
+from scipy.optimize import curve_fit, minimize_scalar
 from scipy.signal import savgol_filter
 
 
@@ -160,10 +161,13 @@ def _parse_wl_from_label(label: str) -> Optional[float]:
     m = re.search(r'(\d+(?:\.\d+)?)\s*nm', label, re.IGNORECASE)
     if m:
         return float(m.group(1))
-    # Priority 2: bare number at end of label (after _ or whitespace)
+    # Priority 2: bare number at end of label (after _ or whitespace).
+    # Require ≥ 200 to avoid treating channel indices like "Sample 1" as 1 nm.
     m = re.search(r'[_\s](\d+(?:\.\d+)?)\s*$', label)
     if m:
-        return float(m.group(1))
+        val = float(m.group(1))
+        if val >= 200:
+            return val
     return None
 
 
@@ -645,9 +649,10 @@ class LEDActinometerResult:
     file:                    str
     actinometer_name:        str
     integration_mode:        str            # "scalar" | "spectral"
-    lam_eff:                 float          # flux-weighted centroid used as monitor λ [nm]
-    epsilon_eff_M_cm:        float          # effective ε [L mol⁻¹ cm⁻¹]
-    QY_eff:                  float          # effective quantum yield
+    lam_eff:                 float          # flux-weighted LED centroid [nm]
+    lam_mon:                 float          # actual monitoring wavelength [nm]
+    epsilon_eff_M_cm:        float          # ε at λ_mon [L mol⁻¹ cm⁻¹]
+    QY_eff:                  float          # effective QY (ε-weighted for spectral mode)
     volume_mL:               float
     path_length_cm:          float
     photon_flux_mol_s:       float          # N_chem from linear fit slope [mol s⁻¹]
@@ -658,66 +663,64 @@ class LEDActinometerResult:
     y_vals:                  np.ndarray
     y_pred:                  np.ndarray
     abs_valid:               np.ndarray
-    N_LED_mol_s:             Optional[float] = None   # reference from LED panel
+    N_LED_mol_s:             Optional[float] = None
     N_LED_std_mol_s:         Optional[float] = None
     success:                 bool = True
     error_msg:               str = ""
+    channel:                 str = ""       # kinetic channel label (empty for scanning)
+    flux_fraction:           float = 1.0   # fraction of LED flux in actinometer valid range
+    fit_slope:               float = 0.0   # slope of ln(A) vs t = −k_obs (dilute mode only)
+    fit_method:              str   = "ODE" # "ODE" | "dilute"
+    t_smooth:                Optional[np.ndarray] = None   # fine time grid for ODE plot curve
+    y_smooth:                Optional[np.ndarray] = None   # ODE solution on t_smooth (absorbance)
 
 
 def run_led_actinometry_file(
     filepath:                Path,
     actinometer_choice:      int,
-    led_wl_arr:              np.ndarray,    # LED emission grid [nm], threshold-clipped
-    led_N_arr:               np.ndarray,    # spectral photon flux [mol s⁻¹ nm⁻¹]
-    lam_eff:                 float,         # flux-weighted centroid [nm]
+    led_wl_arr:              np.ndarray,
+    led_N_arr:               np.ndarray,
+    lam_eff:                 float,
     integration_mode:        str,           # "scalar" | "spectral"
     data_type:               str,           # "scanning" | "kinetic"
-    irradiation_time_s:      float,         # scanning: interval per group; kinetic: unused
+    irradiation_time_s:      float,
     volume_mL:               float,
     path_length_cm:          float,
-    scans_per_group:         int,           # scanning only
+    scans_per_group:         int,
     wavelength_tolerance_nm: float,
-    skip_groups:             int            = 0,     # scanning: skip first N groups (irr. delay)
-    initial_spectrum_path:   Optional[Path] = None,  # kinetic: required (Beer-Lambert ref)
-    fit_time_start_s:        Optional[float] = None, # kinetic: first time point to include (s)
-    fit_time_end_s:          Optional[float] = None, # kinetic: last time point to include (s)
+    skip_groups:             int            = 0,
+    initial_spectrum_path:   Optional[Path] = None,
+    fit_time_start_s:        Optional[float] = None,
+    fit_time_end_s:          Optional[float] = None,
     N_LED_mol_s:             Optional[float] = None,
     N_LED_std_mol_s:         Optional[float] = None,
-) -> "LEDActinometerResult":
+    monitoring_wavelength_nm: float           = 0.0,
+) -> list["LEDActinometerResult"]:
     """
     Process one actinometry CSV measured under LED irradiation.
 
-    Data types
-    ----------
-    scanning : Cary 60 multi-scan UV-Vis CSV (full spectrum at each time point).
-               Beer-Lambert reference = mid scan of the first scan group.
-               Time axis  = group_index × irradiation_time_s.
+    Returns a list of LEDActinometerResult — one entry per monitoring channel:
+      • scanning data  → one result (monitored at λ_eff)
+      • kinetic data   → one result per channel with a parseable wavelength label
 
-    kinetic  : Cary 60 kinetics CSV (fixed wavelength, time series).
-               Beer-Lambert reference = first scan of the initial_spectrum_path
-               file (required).  The channel closest to λ_eff is used.
-               Optional offset correction aligns the kinetic trace to the
-               initial spectrum at λ_eff.
-               Time axis  = directly from the CSV, filtered to [fit_time_start_s,
-               fit_time_end_s] and reset to zero at the first selected point.
+    Integration modes
+    -----------------
+    scalar   : treats LED as monochromatic at λ_eff.
+               ε = ε(λ_mon) from Beer-Lambert reference.
+               QY = QY(λ_eff).
+               Only the kinetic channel closest to λ_eff is used.
 
-    Integration modes (both data types)
-    ------------------------------------
-    scalar   : ε(λ_eff) and QY(λ_eff) from the actinometer formula; equivalent
-               to standard chemical actinometry at the effective wavelength.
-    spectral : flux-weighted averages across the full LED emission band:
-                 ε_eff  = ∫ f(λ)·ε(λ)  dλ
-                 QY_eff = ∫ f(λ)·QY(λ) dλ
-               where f(λ) = N(λ)/N_total (normalised LED spectral shape) and
-               ε(λ) = ε_ref × A(λ)/A(λ_ref) (Beer-Lambert scaling).
-
-    In both modes the standard rate-function formula is applied with the
-    effective ε and QY, monitoring absorbance at λ_eff.
+    spectral : integrates over the full LED emission spectrum.
+               ε(λ_mon) used for Beer-Lambert monitoring.
+               QY_eff = ∫ f(λ)·QY(λ)·[ε(λ)/ε(λ_mon)] dλ  (dimensionless,
+               captures both spectral QY variation and how each irradiation
+               wavelength drives bleaching relative to the monitoring wavelength).
+               All kinetic channels with parseable wavelengths are processed.
     """
-    act = ACTINOMETERS[actinometer_choice]
+    act    = ACTINOMETERS[actinometer_choice]
     wl_min, wl_max = act["wavelength_range_nm"]
 
-    # ── Step 1: Beer-Lambert reference spectrum (ref_wl, ref_ab) ──────────
+    # ── Step 1: Beer-Lambert reference spectrum ───────────────────────────
     if data_type == "scanning":
         scans   = load_spectra_csv(filepath)
         n_scans = len(scans)
@@ -726,7 +729,7 @@ def run_led_actinometry_file(
             raise ValueError(
                 f"Only {n_scans} scans; need ≥ {scans_per_group} per group.")
         n_groups   = n_scans // scans_per_group
-        ref_wl, ref_ab = scans[1]          # mid scan of first group
+        ref_wl, ref_ab = scans[1]
         idx = np.argsort(ref_wl)
         ref_wl, ref_ab = ref_wl[idx], ref_ab[idx]
 
@@ -734,7 +737,7 @@ def run_led_actinometry_file(
         if initial_spectrum_path is None:
             raise ValueError(
                 "Kinetic mode requires an initial spectrum file for Beer-Lambert "
-                "scaling (ε_eff / QY_eff calculation).")
+                "scaling.")
         ref_wl, ref_ab = _load_initial_spectrum(initial_spectrum_path)
         print(f"  Kinetic mode: Beer-Lambert reference from "
               f"{initial_spectrum_path.name}")
@@ -742,39 +745,26 @@ def run_led_actinometry_file(
     else:
         raise ValueError(f"Unknown data_type: '{data_type}'")
 
-    # ── Step 2: A_ref from reference spectrum ─────────────────────────────
+    # ── Step 2: A_ref ─────────────────────────────────────────────────────
     lam_ref = act["epsilon_ref_nm"]
     A_ref   = extract_absorbance(ref_wl, ref_ab, lam_ref, wavelength_tolerance_nm)
     if np.isnan(A_ref) or A_ref <= 0:
+        ref_name = (initial_spectrum_path.name if data_type == "kinetic"
+                    and initial_spectrum_path else filepath.name)
         raise ValueError(
             f"Cannot extract A({lam_ref:.0f} nm) = {A_ref} from the Beer-Lambert "
-            f"reference spectrum. Check that the spectrum covers {lam_ref:.0f} nm "
-            f"and the tolerance ({wavelength_tolerance_nm} nm) is appropriate.")
+            f"reference spectrum ('{ref_name}').\n"
+            f"For kinetic mode this must be a Cary 60 full-spectrum scan CSV, "
+            f"not the kinetic data file itself.")
 
-    # ── Step 3: Effective ε and QY ─────────────────────────────────────────
+    # ── Step 3: Shared spectral arrays (spectral mode only) ───────────────
     N_total = float(np.trapezoid(led_N_arr, led_wl_arr))
-    f_arr   = led_N_arr / N_total   # normalised spectral shape [nm⁻¹]
+    f_arr   = led_N_arr / N_total
 
-    if integration_mode == "scalar":
-        A_lam = extract_absorbance(ref_wl, ref_ab, lam_eff, wavelength_tolerance_nm)
-        if np.isnan(A_lam):
-            raise ValueError(
-                f"Cannot extract A at λ_eff = {lam_eff:.1f} nm from the "
-                f"reference spectrum. Increase λ tolerance or check the spectrum.")
-        epsilon_eff = act["epsilon_ref_M_cm"] * A_lam / A_ref
-        QY_eff      = act["QY_func"](lam_eff)
-        if not (wl_min <= lam_eff <= wl_max):
-            print(f"  WARNING: λ_eff = {lam_eff:.1f} nm is outside the valid "
-                  f"range for {act['name']} ({wl_min}–{wl_max} nm).")
-        print(f"  Mode      : scalar  (λ_eff = {lam_eff:.1f} nm)")
-        print(f"  A({lam_ref:.0f})   : {A_ref:.4f}  A(λ_eff) : {A_lam:.4f}  "
-              f"ratio A(λ_eff)/A({lam_ref:.0f}) = {A_lam/A_ref:.3f}")
-        print(f"  ε_ref({lam_ref:.0f}): {act['epsilon_ref_M_cm']:.4e} L mol⁻¹ cm⁻¹")
-        print(f"  ε(λ_eff)  : {epsilon_eff:.4e} L mol⁻¹ cm⁻¹  "
-              f"[= ε_ref × {A_lam/A_ref:.3f}]")
-        print(f"  QY(λ_eff) : {QY_eff:.4f}")
-
-    elif integration_mode == "spectral":
+    wl_v = f_v = f_v_norm = eps_v = QY_v = None   # populated below for spectral mode
+    # Spectral pre-computed values (used in per-channel loop)
+    QY_eff_spectral = eps_eff_spectral_M_cm = driving_integral_spectral = flux_f_spectral = None
+    if integration_mode == "spectral":
         A_interp    = np.interp(led_wl_arr, ref_wl, ref_ab,
                                 left=np.nan, right=np.nan)
         epsilon_arr = act["epsilon_ref_M_cm"] * A_interp / A_ref
@@ -783,181 +773,362 @@ def run_led_actinometry_file(
             np.array([act["QY_func"](lam) for lam in led_wl_arr]),
             np.nan,
         )
-        valid = np.isfinite(epsilon_arr) & np.isfinite(QY_arr) & (epsilon_arr > 0)
+        valid = (np.isfinite(epsilon_arr) & np.isfinite(QY_arr)
+                 & (epsilon_arr > 0))
         if valid.sum() < 5:
             raise ValueError(
                 f"Only {valid.sum()} valid spectral points for flux-weighted "
-                f"integration (need ≥ 5). Check that the LED emission overlaps "
-                f"the actinometer's valid range ({wl_min}–{wl_max} nm) and "
-                f"that the reference spectrum covers that region.")
-        wl_v, f_v, eps_v, QY_v = (
-            led_wl_arr[valid], f_arr[valid],
-            epsilon_arr[valid], QY_arr[valid],
-        )
-        flux_fraction = float(np.trapezoid(f_v, wl_v))
-        f_v_norm      = f_v / np.trapezoid(f_v, wl_v)
-        epsilon_eff   = float(np.trapezoid(f_v_norm * eps_v, wl_v))
-        QY_eff        = float(np.trapezoid(f_v_norm * QY_v, wl_v))
+                f"integration (need ≥ 5). Check LED emission overlap with "
+                f"the actinometer's valid range ({wl_min}–{wl_max} nm).")
+        wl_v      = led_wl_arr[valid]
+        f_v       = f_arr[valid]
+        eps_v     = epsilon_arr[valid]
+        eps_v_SI  = eps_v * 0.1            # L/(mol·cm) → m²/mol, for ODE
+        QY_v      = QY_arr[valid]
+        flux_f_spectral = float(np.trapezoid(f_v, wl_v))
+        f_v_norm        = f_v / np.trapezoid(f_v, wl_v)
+
+        # QY_eff: pure flux-weighted QY (no ε ratio) — averaged over valid range
+        QY_eff_spectral      = float(np.trapezoid(f_v_norm * QY_v, wl_v))
+        # ε_eff: flux-weighted ε averaged over valid range — for display
+        eps_eff_spectral_M_cm = float(np.trapezoid(f_v_norm * eps_v, wl_v))
+        # Driving integral ∫ f(λ)·QY(λ)·ε(λ) dλ using original (non-renormalised) f
+        # Automatically includes flux_fraction: photons outside valid range have QY=0
+        driving_integral_spectral = float(np.trapezoid(f_v * QY_v * eps_v, wl_v)) * 0.1  # SI: m²/mol
+
+        excluded_pct = (1.0 - flux_f_spectral) * 100.0
         print(f"  Mode      : spectral  ({valid.sum()} pts, "
               f"{wl_v[0]:.0f}–{wl_v[-1]:.0f} nm, "
-              f"{flux_fraction*100:.1f}% of LED flux)")
-        print(f"  ε_eff     : {epsilon_eff:.4e} L mol⁻¹ cm⁻¹")
-        print(f"  QY_eff    : {QY_eff:.4f}")
-    else:
-        raise ValueError(f"Unknown integration_mode: '{integration_mode}'")
+              f"{flux_f_spectral*100:.1f}% of LED flux included, "
+              f"{excluded_pct:.1f}% excluded outside actinometer range)")
+        print(f"  QY_eff    : {QY_eff_spectral:.4f}  (flux-weighted over valid range)")
+        print(f"  ε_eff     : {eps_eff_spectral_M_cm:.4e} L mol⁻¹ cm⁻¹  (flux-weighted over valid range)")
 
-    # ── Step 4: Prefactor ─────────────────────────────────────────────────
-    V_m3       = volume_mL * 1e-6
-    epsilon_SI = epsilon_eff * 0.1        # L mol⁻¹ cm⁻¹ → m² mol⁻¹
-    l_m        = path_length_cm * 1e-2
-    prefactor  = -V_m3 / (epsilon_SI * QY_eff * l_m)
+    # ── Step 4: Build per-channel work list ───────────────────────────────
+    # Each entry: (lam_mon, channel_label, time_array, absorbances_list)
+    channels_to_process: list = []
 
-    # ── Step 5: Build (time_axis, absorbances) ────────────────────────────
     if data_type == "scanning":
         if skip_groups >= n_groups:
             raise ValueError(
-                f"skip_groups = {skip_groups} ≥ n_groups = {n_groups}. "
-                f"Nothing left to fit.")
+                f"skip_groups = {skip_groups} ≥ n_groups = {n_groups}.")
         if skip_groups > 0:
-            print(f"  Skipping first {skip_groups} group(s) (irradiation delay).")
+            print(f"  Skipping first {skip_groups} group(s).")
         absorbances = []
         for g in range(skip_groups, n_groups):
             group_abs = [
                 extract_absorbance(
-                    scans[g * scans_per_group + s][0],
-                    scans[g * scans_per_group + s][1],
+                    scans[g * scans_per_group + j][0],
+                    scans[g * scans_per_group + j][1],
                     lam_eff, wavelength_tolerance_nm,
                 )
-                for s in range(scans_per_group)
+                for j in range(scans_per_group)
+                if g * scans_per_group + j < n_scans
             ]
             valid_abs = [v for v in group_abs if not np.isnan(v)]
             absorbances.append(np.mean(valid_abs) if valid_abs else np.nan)
         time_axis = np.arange(len(absorbances)) * irradiation_time_s
+        channels_to_process.append((lam_eff, "", time_axis, absorbances))
 
     else:  # kinetic
-        channels = load_kinetic_csv(filepath)
-        if not channels:
+        all_channels = load_kinetic_csv(filepath)
+        if not all_channels:
             raise ValueError(f"No valid channels found in {filepath.name}.")
 
-        # Find the channel whose label wavelength is closest to λ_eff
-        best_label: Optional[str] = None
-        best_dist = float("inf")
-        best_wl_found = lam_eff
-        for label in channels:
-            wl_parsed = _parse_wl_from_label(label)
-            if wl_parsed is not None and abs(wl_parsed - lam_eff) < best_dist:
-                best_dist      = abs(wl_parsed - lam_eff)
-                best_label     = label
-                best_wl_found  = wl_parsed
-        if best_label is None:
-            raise ValueError(
-                f"Cannot parse wavelengths from channel labels in {filepath.name}. "
-                f"Labels found: {list(channels.keys())}. "
-                f"Expected format: e.g. '25C_672nm'.")
-        print(f"  Channel   : '{best_label}'  "
-              f"(λ = {best_wl_found:.0f} nm, "
-              f"Δλ = {best_dist:.1f} nm from λ_eff = {lam_eff:.1f} nm)")
-
-        t_raw, a_raw = channels[best_label]
-
-        # Time window filter
-        mask = np.ones(len(t_raw), dtype=bool)
-        if fit_time_start_s is not None:
-            mask &= t_raw >= fit_time_start_s
-        if fit_time_end_s is not None:
-            mask &= t_raw <= fit_time_end_s
-        t_win = t_raw[mask]
-        a_win = a_raw[mask]
-        if len(t_win) < 2:
-            raise ValueError(
-                f"Fewer than 2 data points in the selected time window "
-                f"[{fit_time_start_s}, {fit_time_end_s}] s.")
-
-        # Offset correction: align kinetic start to initial spectrum at λ_eff
-        A_init_lam = extract_absorbance(ref_wl, ref_ab, lam_eff, wavelength_tolerance_nm)
-        if not np.isnan(A_init_lam):
-            n_bl         = min(5, len(a_win))
-            A_kin_start  = float(a_win[:n_bl].mean())
-            offset       = A_init_lam - A_kin_start
-            if abs(offset) > 1e-4:
-                print(f"  Offset    : {offset:+.4f} AU  "
-                      f"(A_init = {A_init_lam:.4f}, "
-                      f"A_kin_t0 = {A_kin_start:.4f})")
-            a_win = a_win + offset
+        if integration_mode == "scalar":
+            # Scalar: only the channel closest to λ_eff
+            best_label: Optional[str] = None
+            best_dist  = float("inf")
+            best_wl    = lam_eff
+            for label in all_channels:
+                wl_p = _parse_wl_from_label(label)
+                if wl_p is None and monitoring_wavelength_nm > 0:
+                    wl_p = monitoring_wavelength_nm
+                if wl_p is not None and abs(wl_p - lam_eff) < best_dist:
+                    best_dist  = abs(wl_p - lam_eff)
+                    best_label = label
+                    best_wl    = wl_p
+            if best_label is None:
+                raise ValueError(
+                    f"Cannot parse wavelengths from channel labels in "
+                    f"{filepath.name}. Labels: {list(all_channels.keys())}.\n"
+                    f"Set 'Monitoring wavelength' in the kinetic parameters to specify it manually.")
+            selected = {best_label: (best_wl, all_channels[best_label])}
+            print(f"  Scalar: channel '{best_label}'  "
+                  f"(λ_mon = {best_wl:.0f} nm, "
+                  f"Δλ = {best_dist:.1f} nm from λ_eff = {lam_eff:.1f} nm)")
         else:
-            print(f"  WARNING: Cannot extract A at λ_eff from initial spectrum — "
-                  f"no offset correction applied.")
+            # Spectral: all channels with parseable wavelengths (or monitoring_wavelength_nm fallback)
+            selected = {}
+            for label, data in all_channels.items():
+                wl_p = _parse_wl_from_label(label)
+                if wl_p is None:
+                    if monitoring_wavelength_nm > 0:
+                        wl_p = monitoring_wavelength_nm
+                        print(f"  Channel '{label}': no wavelength in label — "
+                              f"using manual λ_mon = {monitoring_wavelength_nm:.0f} nm")
+                    else:
+                        print(f"  Skipping '{label}': cannot parse wavelength "
+                              f"(set 'Monitoring wavelength' to specify manually).")
+                        continue
+                selected[label] = (wl_p, data)
+            if not selected:
+                raise ValueError(
+                    f"No channels with parseable wavelengths in {filepath.name}. "
+                    f"Labels: {list(all_channels.keys())}.\n"
+                    f"Set 'Monitoring wavelength' in the kinetic parameters to specify it manually.")
 
-        # Reset time so first selected point = t=0
-        time_axis   = t_win - t_win[0]
-        absorbances = list(a_win)
+        for label, (lam_mon_ch, (t_raw, a_raw)) in selected.items():
+            mask = np.ones(len(t_raw), dtype=bool)
+            if fit_time_start_s is not None:
+                mask &= t_raw >= fit_time_start_s
+            if fit_time_end_s is not None:
+                mask &= t_raw <= fit_time_end_s
+            t_win = t_raw[mask]
+            a_win = a_raw[mask]
+            if len(t_win) < 2:
+                print(f"  Skipping '{label}': too few points in time window.")
+                continue
+            # Offset correction: align kinetic start to initial spectrum at λ_mon
+            A_init = extract_absorbance(ref_wl, ref_ab, lam_mon_ch,
+                                        wavelength_tolerance_nm)
+            if not np.isnan(A_init):
+                n_bl        = min(5, len(a_win))
+                A_kin_start = float(a_win[:n_bl].mean())
+                offset      = A_init - A_kin_start
+                if abs(offset) > 1e-4:
+                    print(f"  Offset [{label}]: {offset:+.4f} AU  "
+                          f"(A_init = {A_init:.4f}, "
+                          f"A_kin_t0 = {A_kin_start:.4f})")
+                a_win = a_win + offset
+            else:
+                print(f"  WARNING [{label}]: Cannot extract A at "
+                      f"λ={lam_mon_ch:.0f} nm — no offset correction.")
+            time_axis = t_win - t_win[0]
+            channels_to_process.append(
+                (lam_mon_ch, label, time_axis, list(a_win)))
+            print(f"  Channel   : '{label}'  (λ_mon = {lam_mon_ch:.0f} nm)")
 
-    # ── Step 6: Rate function and linear fit ──────────────────────────────
-    A_0 = absorbances[0]
-    if np.isnan(A_0) or (10 ** A_0 - 1) <= 0:
+    if not channels_to_process:
+        raise ValueError(f"No processable channels for {filepath.name}.")
+
+    # ── Step 5: Per-channel QY_eff, ε_eff, driving integral, fit ────────────
+    # Formula: A_mon(t) = A_mon(0) · exp(−k·t)  [dilute limit]
+    #   → ln(A_mon) = ln(A_mon(0)) − k·t   (linear fit, slope = −k)
+    #   → N_total = k·V / (ln(10)·l·∫f(λ)·QY(λ)·ε(λ)dλ)
+    # The driving integral uses the original (non-renormalised) LED spectrum f(λ),
+    # so photons outside the actinometer's valid range (QY=0) contribute nothing
+    # and the flux fraction is automatically accounted for.
+    results: list[LEDActinometerResult] = []
+
+    V_m3 = volume_mL * 1e-6
+    l_m  = path_length_cm * 1e-2
+
+    for lam_mon, channel_label, time_axis, absorbances in channels_to_process:
+        # ε at monitoring wavelength — needed only for the offset correction
+        A_lam_mon = extract_absorbance(ref_wl, ref_ab, lam_mon,
+                                       wavelength_tolerance_nm)
+        if np.isnan(A_lam_mon) or A_lam_mon <= 0:
+            print(f"  WARNING: Cannot extract A at λ_mon = {lam_mon:.0f} nm "
+                  f"from reference spectrum — skipping channel.")
+            continue
+        epsilon_mon = act["epsilon_ref_M_cm"] * A_lam_mon / A_ref
+
+        if integration_mode == "scalar":
+            QY_eff = act["QY_func"](lam_eff)
+            if not (wl_min <= lam_eff <= wl_max):
+                print(f"  WARNING: λ_eff = {lam_eff:.1f} nm outside valid range "
+                      f"({wl_min}–{wl_max} nm) for {act['name']}.")
+            # ε at the irradiation wavelength drives the photochemistry
+            A_lam_eff    = extract_absorbance(ref_wl, ref_ab, lam_eff, wavelength_tolerance_nm)
+            epsilon_irr  = (act["epsilon_ref_M_cm"] * A_lam_eff / A_ref
+                            if not np.isnan(A_lam_eff) and A_lam_eff > 0 else epsilon_mon)
+            # driving integral: QY(λ_eff) × ε(λ_eff)  [SI: m²/mol]
+            driving_integral = QY_eff * epsilon_irr * 0.1
+            eps_eff_display  = epsilon_irr
+            flux_fraction    = 1.0
+            print(f"  Mode      : scalar  (λ_eff = {lam_eff:.1f} nm, "
+                  f"λ_mon = {lam_mon:.0f} nm)")
+            print(f"  ε(λ_eff)  : {epsilon_irr:.4e} L mol⁻¹ cm⁻¹  (driving)")
+            print(f"  ε(λ_mon)  : {epsilon_mon:.4e} L mol⁻¹ cm⁻¹  (monitoring, offset correction only)")
+            print(f"  QY(λ_eff) : {QY_eff:.4f}")
+
+        else:  # spectral
+            # Use pre-computed spectral integrals from Step 3
+            QY_eff           = QY_eff_spectral
+            eps_eff_display  = eps_eff_spectral_M_cm
+            driving_integral = driving_integral_spectral   # already in SI (m²/mol)
+            flux_fraction    = flux_f_spectral
+            print(f"  Channel λ_mon = {lam_mon:.0f} nm  |  "
+                  f"QY_eff = {QY_eff:.4f}  |  "
+                  f"ε_eff = {eps_eff_display:.4e} L mol⁻¹ cm⁻¹  |  "
+                  f"flux fraction = {flux_fraction:.3f}")
+
+        # ── Build valid data arrays ──────────────────────────────────────────
+        A_0 = absorbances[0]
+        if np.isnan(A_0) or A_0 <= 0:
+            lbl = channel_label or "scan"
+            print(f"  WARNING [{lbl}]: A_0 = {A_0:.4f} — cannot start fit. Skipping.")
+            continue
+
+        t_valid, abs_valid = [], []
+        for i, A_i in enumerate(absorbances):
+            if np.isnan(A_i) or A_i <= 0:
+                if not np.isnan(A_i):
+                    print(f"  t = {time_axis[i]:.0f} s: A ≤ 0 — skipping point.")
+                continue
+            t_valid.append(time_axis[i])
+            abs_valid.append(A_i)
+
+        t_valid   = np.array(t_valid)
+        abs_valid = np.array(abs_valid)
+
+        if len(t_valid) < 2:
+            print(f"  Not enough valid points for channel '{channel_label or 'scan'}'.")
+            continue
+
+        # ── EXACT ODE FIT ────────────────────────────────────────────────────
+        # Exact rate law (no dilute approximation):
+        #   d[C]/dt = -(N/V) · ∫ f(λ)·QY(λ)·(1 − 10^{−ε(λ)·l·[C]}) dλ
+        # where (1 − 10^{−ε(λ)·l·[C]}) is the exact fraction of photons absorbed.
+        # [C](t) is solved numerically; N_total is the single free parameter.
+        # A_mon(t) = ε_mon · l · [C](t)  for comparison with measured absorbance.
+
+        epsilon_mon_SI = epsilon_mon * 0.1    # L/(mol·cm) → m²/mol
+
+        # Initial concentration from first absorbance point
+        C0 = A_0 / (epsilon_mon_SI * l_m)
+
+        # Build the ODE integrand function for this channel
+        if integration_mode == "scalar":
+            _eps_irr_SI = epsilon_irr * 0.1
+            _QY_s       = QY_eff
+            def _integrand(C, _e=_eps_irr_SI, _q=_QY_s):
+                Av = _e * l_m * C
+                return _q * (1.0 - 10.0 ** (-float(np.clip(Av, 0, 500))))
+        else:  # spectral
+            _ev = eps_v_SI   # vector, m²/mol
+            _fv = f_v
+            _qv = QY_v
+            _wv = wl_v
+            def _integrand(C, _e=_ev, _f=_fv, _q=_qv, _w=_wv):
+                Av   = _e * l_m * C
+                frac = 1.0 - 10.0 ** (-np.clip(Av, 0, 500))
+                return float(np.trapezoid(_f * _q * frac, _w))
+
+        def _ode(t, C_vec, N):
+            return [-(N / V_m3) * _integrand(C_vec[0])]
+
+        def _run_ode(N_trial, t_eval):
+            sol = solve_ivp(_ode, [t_eval[0], t_eval[-1]], [C0],
+                            t_eval=t_eval, args=(N_trial,),
+                            method='RK45', rtol=1e-6, atol=1e-12)
+            return sol.y[0] if sol.success else None
+
+        def _A_pred(N_trial, t_eval=t_valid):
+            C = _run_ode(N_trial, t_eval)
+            return epsilon_mon_SI * l_m * C if C is not None else None
+
+        def _ssr(log_N):
+            A = _A_pred(np.exp(log_N))
+            return float(np.sum((A - abs_valid) ** 2)) if A is not None else 1e30
+
+        # Initial estimate from dilute approximation (fast, for bounds)
+        k_lin_init  = max(-np.polyfit(t_valid, np.log(abs_valid), 1)[0], 1e-10)
+        N_init      = k_lin_init * V_m3 / (np.log(10) * l_m * driving_integral)
+        N_init      = max(N_init, 1e-15)
+
+        opt = minimize_scalar(_ssr,
+                              bounds=(np.log(N_init * 1e-3), np.log(N_init * 1e3)),
+                              method='bounded',
+                              options={'xatol': 1e-12})
+        N_chem = float(np.exp(opt.x))
+
+        # Uncertainty via numerical Jacobian: σ_N = σ_res / ‖dA/dN‖
+        h_N = N_chem * 1e-4
+        A_p = _A_pred(N_chem + h_N)
+        A_m = _A_pred(N_chem - h_N)
+        if A_p is not None and A_m is not None:
+            J          = (A_p - A_m) / (2.0 * h_N)
+            sigma_res  = np.sqrt(opt.fun / max(len(t_valid) - 1, 1))
+            JtJ        = float(np.dot(J, J))
+            N_chem_std = (sigma_res / np.sqrt(JtJ)) if JtJ > 0 else np.nan
+        else:
+            N_chem_std = np.nan
+
+        # Fit quality (R² on absorbance)
+        A_fitted = _A_pred(N_chem)
+        if A_fitted is None:
+            print(f"  ODE solution failed for channel '{channel_label or 'scan'}'.")
+            continue
+        ss_res = float(np.sum((abs_valid - A_fitted) ** 2))
+        ss_tot = float(np.sum((abs_valid - abs_valid.mean()) ** 2))
+        r2     = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+        # Smooth ODE curve for plotting (300-point fine grid)
+        t_smooth = np.linspace(t_valid[0], t_valid[-1] * 1.02, 300)
+        C_smooth = _run_ode(N_chem, t_smooth)
+        y_smooth = epsilon_mon_SI * l_m * C_smooth if C_smooth is not None else A_fitted
+
+        lbl = f"'{channel_label}'" if channel_label else "scan"
+        print(f"  [{lbl}] N_chem : {N_chem:.4e} ± {N_chem_std:.4e} mol s⁻¹  "
+              f"(R² = {r2:.4f},  method = ODE exact)")
+        if N_LED_mol_s is not None:
+            dev = (N_chem - N_LED_mol_s) / N_LED_mol_s * 100.0
+            print(f"  vs N_LED  : {N_LED_mol_s:.4e} mol s⁻¹  "
+                  f"(deviation = {dev:+.2f} %)")
+
+        results.append(LEDActinometerResult(
+            file=filepath.name,
+            actinometer_name=act["name"],
+            integration_mode=integration_mode,
+            lam_eff=lam_eff,
+            lam_mon=lam_mon,
+            epsilon_eff_M_cm=eps_eff_display,
+            QY_eff=QY_eff,
+            volume_mL=volume_mL,
+            path_length_cm=path_length_cm,
+            photon_flux_mol_s=N_chem,
+            photon_flux_std_mol_s=N_chem_std,
+            r2=r2,
+            intercept=0.0,
+            t_valid=t_valid,
+            y_vals=abs_valid,
+            y_pred=A_fitted,
+            abs_valid=abs_valid,
+            N_LED_mol_s=N_LED_mol_s,
+            N_LED_std_mol_s=N_LED_std_mol_s,
+            success=True,
+            channel=channel_label,
+            flux_fraction=flux_fraction,
+            fit_slope=0.0,
+            fit_method="ODE",
+            t_smooth=t_smooth,
+            y_smooth=y_smooth,
+        ))
+
+        # ── DILUTE APPROXIMATION (kept for reference, not used) ───────────────
+        # Valid only when A << 0.1 at all irradiated wavelengths.
+        # Linearises (1−10^{−A}) ≈ A·ln10, giving first-order exponential decay.
+        #   ln(A_mon) = ln(A_0) − k·t   (linear fit, slope = −k)
+        #   N = k·V / (ln10·l·∫f(λ)·QY(λ)·ε(λ)dλ)
+        #
+        # y_vals_d = np.log(abs_valid)
+        # popt, pcov = curve_fit(_linear, t_valid, y_vals_d)
+        # fit_slope_d, intercept_d = popt
+        # slope_std_d, _ = np.sqrt(np.diag(pcov))
+        # k_obs_d    = -fit_slope_d
+        # N_chem_d   = k_obs_d * V_m3 / (np.log(10) * l_m * driving_integral)
+        # N_chem_std_d = slope_std_d * V_m3 / (np.log(10) * l_m * driving_integral)
+        # y_pred_d   = _linear(t_valid, fit_slope_d, intercept_d)
+        # r2_d       = 1 - np.sum((y_vals_d-y_pred_d)**2)/np.sum((y_vals_d-y_vals_d.mean())**2)
+        # ─────────────────────────────────────────────────────────────────────
+
+    if not results:
         raise ValueError(
-            f"A_0 = {A_0:.4f} — cannot compute log10(10^A − 1). "
-            f"Check that the actinometer absorbance at λ_eff = {lam_eff:.1f} nm "
-            f"is positive and not too close to zero.")
+            f"No valid results produced for {filepath.name}.")
 
-    log_ref = np.log10(10 ** A_0 - 1)
-    t_valid, y_vals, abs_valid = [], [], []
-
-    for i, A_i in enumerate(absorbances):
-        if np.isnan(A_i):
-            continue
-        val = 10 ** A_i - 1
-        if val <= 0:
-            print(f"  t = {time_axis[i]:.0f} s: 10^A − 1 ≤ 0 — skipping.")
-            continue
-        y_vals.append(prefactor * (np.log10(val) - log_ref))
-        t_valid.append(time_axis[i])
-        abs_valid.append(A_i)
-
-    t_valid   = np.array(t_valid)
-    y_vals    = np.array(y_vals)
-    abs_valid = np.array(abs_valid)
-
-    if len(t_valid) < 2:
-        raise ValueError("Not enough valid points for a linear fit (< 2).")
-
-    popt, pcov       = curve_fit(_linear, t_valid, y_vals)
-    slope, intercept = popt
-    slope_std, _     = np.sqrt(np.diag(pcov))
-
-    y_pred = _linear(t_valid, slope, intercept)
-    ss_res = np.sum((y_vals - y_pred) ** 2)
-    ss_tot = np.sum((y_vals - y_vals.mean()) ** 2)
-    r2     = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-
-    print(f"  N_chem    : {slope:.4e} ± {slope_std:.4e} mol s⁻¹  "
-          f"(R² = {r2:.4f})")
-    if N_LED_mol_s is not None:
-        dev = (slope - N_LED_mol_s) / N_LED_mol_s * 100.0
-        print(f"  vs N_LED  : {N_LED_mol_s:.4e} mol s⁻¹  "
-              f"(deviation = {dev:+.2f} %)")
-
-    return LEDActinometerResult(
-        file=filepath.name,
-        actinometer_name=act["name"],
-        integration_mode=integration_mode,
-        lam_eff=lam_eff,
-        epsilon_eff_M_cm=epsilon_eff,
-        QY_eff=QY_eff,
-        volume_mL=volume_mL,
-        path_length_cm=path_length_cm,
-        photon_flux_mol_s=slope,
-        photon_flux_std_mol_s=slope_std,
-        r2=r2,
-        intercept=intercept,
-        t_valid=t_valid,
-        y_vals=y_vals,
-        y_pred=y_pred,
-        abs_valid=abs_valid,
-        N_LED_mol_s=N_LED_mol_s,
-        N_LED_std_mol_s=N_LED_std_mol_s,
-        success=True,
-    )
+    return results
 
 
 def plot_led_actinometry_result(result: "LEDActinometerResult") -> plt.Figure:
@@ -974,20 +1145,33 @@ def plot_led_actinometry_result(result: "LEDActinometerResult") -> plt.Figure:
     ax1 = axes[0] if has_ref else axes
     ax2 = axes[1] if has_ref else None
 
-    # ── Left: rate function ────────────────────────────────────────────────
+    # ── Left: absorbance vs time with fit ─────────────────────────────────
+    is_ode = getattr(result, "fit_method", "ODE") == "ODE"
+
     ax1.plot(result.t_valid, result.y_vals,
              "o", color="black", markerfacecolor="none",
              markeredgewidth=1.2, label="Data")
 
-    t_fit = np.linspace(0, result.t_valid.max() * 1.05, 200)
-    ax1.plot(t_fit, _linear(t_fit, result.photon_flux_mol_s, result.intercept),
-             "--", color="red", linewidth=2, label="Linear fit")
+    if is_ode and result.t_smooth is not None:
+        ax1.plot(result.t_smooth, result.y_smooth,
+                 "-", color="red", linewidth=2, label="ODE fit (exact)")
+    else:
+        # Dilute approximation: reconstruct linear fit on ln(A) scale — replot as A
+        t_fit = np.linspace(result.t_valid[0], result.t_valid.max() * 1.05, 200)
+        ax1.plot(t_fit, np.exp(_linear(t_fit, result.fit_slope, result.intercept)),
+                 "--", color="red", linewidth=2, label="Linear fit (dilute)")
 
-    mode_lbl = "scalar" if result.integration_mode == "scalar" else "spectral"
-    eps_lbl  = "ε(λ_eff)" if result.integration_mode == "scalar" else "ε_eff"
-    QY_lbl   = "QY(λ_eff)" if result.integration_mode == "scalar" else "QY_eff"
+    mode_lbl    = "scalar" if result.integration_mode == "scalar" else "spectral"
+    QY_lbl      = "QY(λ_eff)" if result.integration_mode == "scalar" else "QY_eff"
+    lam_mon_str = f"{result.lam_mon:.1f}" if hasattr(result, "lam_mon") else f"{result.lam_eff:.1f}"
+    eps_lbl     = "ε(λ_eff)" if result.integration_mode == "scalar" else "ε_eff (flux-wtd)"
+    fit_lbl     = "ODE (exact)" if is_ode else "dilute approx."
+    flux_str    = (f"Flux in valid range: {result.flux_fraction*100:.1f}%\n"
+                   if result.integration_mode == "spectral" else "")
     annotation = (
-        f"Mode: {mode_lbl}  (λ_eff = {result.lam_eff:.1f} nm)\n"
+        f"Fit: {fit_lbl}  |  Mode: {mode_lbl}\n"
+        f"λ_eff = {result.lam_eff:.1f} nm,  λ_mon = {lam_mon_str} nm\n"
+        f"{flux_str}"
         f"{eps_lbl} = {result.epsilon_eff_M_cm:.3e} L mol⁻¹ cm⁻¹\n"
         f"{QY_lbl} = {result.QY_eff:.4f}\n"
         f"N_chem = {result.photon_flux_mol_s:.4e} ± "
@@ -1000,8 +1184,9 @@ def plot_led_actinometry_result(result: "LEDActinometerResult") -> plt.Figure:
              bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8))
 
     ax1.set_xlabel("Irradiation time (s)")
-    ax1.set_ylabel("Rate function (mol)")
-    ax1.set_title(f"{result.actinometer_name}  |  {result.file}")
+    ax1.set_ylabel("Absorbance")
+    ch_str = f"  |  {result.channel}" if getattr(result, "channel", "") else ""
+    ax1.set_title(f"{result.actinometer_name}  |  {result.file}{ch_str}")
     ax1.legend()
     ax1.grid(True)
 

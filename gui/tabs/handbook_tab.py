@@ -807,102 +807,327 @@ verification experiments.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-_SECTIONS_LED["LED Actinometry — How It Works"] = f"""
-<h1>LED Actinometry — How It Works</h1>
+_SECTIONS_LED["LED Actinometry — Overview"] = f"""
+<h1>LED Actinometry — Overview</h1>
 
 <p>
-LED actinometry measures the photon flux N (mol s⁻¹) of an LED source by
-irradiating a chemical actinometer solution (e.g. potassium ferrioxalate) and
-fitting the rate of photoproduct formation.  The result (N_chem) is compared to
-the independently measured flux N_LED obtained from the LED emission spectrum
-and optical power.
+Chemical actinometry determines the absolute photon flux N (mol photons s⁻¹) of
+an LED light source by irradiating a reference compound (actinometer) with known
+photochemical properties and fitting the resulting kinetic absorbance trace.
+The chemically determined flux N_chem can then be compared against the
+independently measured flux N_LED from a power meter and emission spectrum.
 </p>
 
-<h2>Step 1 — Beer–Lambert Reference Spectrum</h2>
+<h2>Why Chemical Actinometry?</h2>
 <p>
-A full absorption spectrum of the actinometer solution is loaded.  For scanning
-kinetic data the mid-scan of the first group is used; for fixed-wavelength kinetic
-data an independently measured initial spectrum must be supplied.
-</p>
-<p>
-The absorbance at 562 nm, A(562), is extracted.  This serves as the anchor for
-scaling ε to any other wavelength via Beer–Lambert:
-</p>
-<pre class="eq">ε(λ) = ε_562 · A(λ) / A(562)</pre>
-
-<h2>Step 2 — Effective ε and QY (ε_eff, QY_eff)</h2>
-<p>
-Two integration modes are available:
+A power meter measures optical power (W), not photon flux.  Converting W to
+mol photons s⁻¹ requires knowing the spectral shape of the source, introducing
+uncertainty from the detector calibration and spectral weighting.  Chemical
+actinometry gives photon flux directly at the sample position, accounts for
+beam geometry automatically, and uses the same optical path as the actual
+experiment.
 </p>
 
+<h2>Two-Stage Workflow</h2>
 <table>
-  <tr><th>Mode</th><th>ε_eff definition</th><th>QY_eff definition</th></tr>
+  <tr><th>Tab</th><th>Purpose</th><th>Output</th></tr>
   <tr>
-    <td><code>scalar</code></td>
-    <td>ε at the flux-weighted effective wavelength λ_eff:<br>
-        <code>ε_eff = ε_562 · A(λ_eff) / A(562)</code></td>
-    <td><code>QY(λ_eff)</code> from the actinometer's wavelength-dependent
-        quantum yield function</td>
+    <td><b>LED Characterisation</b></td>
+    <td>Load emission spectrum and power measurement; compute the spectral
+        photon-flux array N(λ) and the total flux N_LED.</td>
+    <td>N_LED (mol s⁻¹), spectral shape f(λ), λ_eff</td>
   </tr>
   <tr>
-    <td><code>spectral</code></td>
-    <td>Flux-weighted spectral average over the full LED band:<br>
-        <code>ε_eff = ∫ f(λ) · ε(λ) dλ / ∫ f(λ) dλ</code><br>
-        where <code>f(λ) = N(λ) / N_total</code> is the normalised LED shape
-        and <code>ε(λ) = ε_562 · A(λ)/A(562)</code></td>
-    <td>Flux-weighted average QY:<br>
-        <code>QY_eff = ∫ f(λ) · QY(λ) dλ / ∫ f(λ) dλ</code></td>
+    <td><b>LED Actinometry</b></td>
+    <td>Load actinometer kinetic data; fit N_chem from the bleaching rate
+        using the spectral shape from Stage 1.</td>
+    <td>N_chem (mol s⁻¹) ± uncertainty, R²</td>
   </tr>
 </table>
 
 <div class="note">
-<b>Physical meaning of ε_eff:</b>
-In <em>scalar</em> mode, ε_eff is simply the molar absorption coefficient of the
-actinometer at the representative wavelength λ_eff.  In <em>spectral</em> mode it
-is the photon-flux-weighted mean of ε(λ) across the LED band — the effective
-single-wavelength ε that would produce the same absorbed flux if the LED were
-monochromatic.  Both definitions rely on the Beer–Lambert ratio
-A(λ)/A(562) to extrapolate from the known reference ε_562.
+<b>Independence of N_chem from the power meter:</b>
+The actinometry formula only uses the <em>normalised shape</em> f(λ) = N(λ)/N_total
+from the LED characterisation step.  The absolute power measurement (N_LED) cancels
+in the normalisation and never enters the chemical fit — N_chem is determined
+entirely from the kinetic absorbance data.  N_LED appears only in the optional
+comparison at the end.
 </div>
 
-<h2>Step 3 — Rate Function and Linear Fit</h2>
+<h2>Available Actinometers</h2>
+<table>
+  <tr><th>#</th><th>Name</th><th>Valid range (nm)</th><th>ε_ref (L mol⁻¹ cm⁻¹)</th><th>λ_ref (nm)</th><th>QY(λ) formula</th></tr>
+  <tr>
+    <td>1</td><td>Actinometer 1</td><td>450 – 580</td>
+    <td>1.00 × 10⁴</td><td>515</td>
+    <td><code>10^(−0.796 + 133/λ)</code></td>
+  </tr>
+  <tr>
+    <td>2</td><td>Actinometer 2</td><td>480 – 620</td>
+    <td>1.09 × 10⁴</td><td>562</td>
+    <td><code>10^(−2.67 + 526/λ)</code></td>
+  </tr>
+</table>
 <p>
-The actinometer ODE (one absorbing species, no back-reaction) can be integrated
-analytically.  Define:
+QY(λ) formulae are empirical fits from the actinometer literature valid within
+the stated wavelength range.  LED wavelengths outside that range are assigned
+QY = 0 and excluded from the spectral integration.
 </p>
-<pre class="eq">y(t) = −V / (QY_eff · ε_eff · l) · [log₁₀(10^A(t) − 1) − log₁₀(10^A₀ − 1)]</pre>
+
+<h2>Integration Modes</h2>
+<table>
+  <tr><th>Mode</th><th>When to use</th><th>Description</th></tr>
+  <tr>
+    <td><code>scalar</code></td>
+    <td>Narrow LEDs (&lt; ~10 nm FWHM) or quick estimates</td>
+    <td>Treats the LED as monochromatic at the flux-weighted centroid λ_eff.
+        Uses QY(λ_eff) and ε(λ_eff) only.</td>
+  </tr>
+  <tr>
+    <td><code>spectral</code></td>
+    <td>Broad LEDs, or high-accuracy measurements</td>
+    <td>Integrates over the full LED emission band.  Each wavelength
+        contributes with its own QY(λ), ε(λ), and photon-flux weight f(λ).
+        Recommended for all quantitative work.</td>
+  </tr>
+</table>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_LED["LED Actinometry — Physics & ODE"] = f"""
+<h1>LED Actinometry — Physics and ODE Derivation</h1>
+
+<h2>Rate Equation (exact, polychromatic)</h2>
 <p>
-where A(t) is the measured absorbance at λ_eff (or the kinetic channel closest to it).
-The derivation shows that y(t) is exactly linear in time:
+An actinometer solution of concentration [C] (mol m⁻³) is irradiated by a
+polychromatic LED.  The rate of photochemical consumption is:
 </p>
-<pre class="eq">y(t) = N_chem · t + intercept</pre>
-<p>
-The slope of a linear fit to the (t, y) data gives N_chem in mol s⁻¹ directly.
-</p>
+<pre class="eq">d[C]/dt = −(N_total / V) · ∫ f(λ) · QY(λ) · (1 − 10^(−ε(λ)·l·[C])) dλ</pre>
+<p>where:</p>
+<ul>
+  <li><b>N_total</b> — total photon flux (mol photons s⁻¹), the quantity to be determined</li>
+  <li><b>V</b> — solution volume (m³)</li>
+  <li><b>f(λ) = N(λ)/N_total</b> — normalised LED photon-flux spectrum (nm⁻¹), integrates to 1</li>
+  <li><b>QY(λ)</b> — quantum yield of the actinometer at wavelength λ (dimensionless)</li>
+  <li><b>(1 − 10^(−ε(λ)·l·[C]))</b> — exact fraction of photons absorbed at wavelength λ</li>
+  <li><b>ε(λ)</b> — molar absorption coefficient at λ (m² mol⁻¹ = L mol⁻¹ cm⁻¹ × 0.1)</li>
+  <li><b>l</b> — optical path length (m)</li>
+</ul>
 
 <div class="note">
-<b>Why is y linear?</b>
-The integral ∫ dA / (1 − 10^(−A)) = log₁₀(10^A − 1) + const, so the transformed
-variable y absorbs the nonlinear Beer–Lambert correction factor exactly.  The result
-is valid for <em>any</em> absorbance level, not just the optically thin limit.
+<b>Key physical content:</b> The integral sums contributions from every LED
+wavelength, each weighted by the photon-flux fraction f(λ), the quantum yield QY(λ),
+and the fraction of those photons actually absorbed by the actinometer (1−10^(−A(λ))).
+No dilute-solution approximation is made — all absorbance levels are handled correctly.
 </div>
 
-<h2>Step 4 — N_chem vs N_LED Comparison</h2>
+<h2>Why not use the Parker Formula?</h2>
 <p>
-The result table shows N_chem (from the actinometer fit), N_LED (from the LED
-characterisation panel), and the percentage deviation:
+The classical Parker linearisation (y = log₁₀(10^A − 1), slope = N·QY·ε·l/V)
+is exact only for <em>monochromatic</em> irradiation at the <em>same wavelength
+that is being monitored</em>.  For a polychromatic LED source monitored at a
+different wavelength, different irradiation wavelengths have different ε(λ), so
+the algebraic cancellation that makes y(t) exactly linear breaks down.  The
+numerical ODE approach is valid for any source spectrum and any absorbance level.
 </p>
-<pre class="eq">deviation (%) = (N_chem − N_LED) / N_LED × 100</pre>
+
+<h2>Numerical ODE Fit</h2>
 <p>
-A deviation of ±5 % is typical for careful measurements.  Larger deviations may
-indicate:
+The ODE is solved numerically (Runge-Kutta 4/5, RK45) with N_total as the single
+free parameter.  The fit minimises the sum of squared residuals between the
+predicted absorbance A_mon(t) and the measured trace:
 </p>
-<ul>
-  <li>LED warm-up drift (measure power immediately before and after the experiment)</li>
-  <li>Beam geometry mismatch between power-meter probe and cuvette cross-section</li>
-  <li>Actinometer absorbance outside the recommended range for the chosen actinometer</li>
-  <li>Inner-filter or photobleaching effects in the actinometer</li>
-</ul>
+<pre class="eq">A_mon(t) = ε(λ_mon) · l · [C](t)
+minimise over N_total:  Σ_i (A_mon_pred(t_i) − A_mon_meas(t_i))²</pre>
+<p>
+The initial estimate for N_total comes from a rapid linear (dilute) approximation
+on ln(A) vs t; the bounded scalar minimiser then refines it to high precision.
+</p>
+
+<h2>ε(λ) at Each Irradiation Wavelength</h2>
+<p>
+The extinction coefficient is needed at every point in the LED emission spectrum.
+It is obtained by Beer–Lambert scaling from the initial absorbance spectrum of the
+actinometer solution:
+</p>
+<pre class="eq">ε(λ) = ε_ref · A_initial(λ) / A_initial(λ_ref)</pre>
+<p>
+where ε_ref and λ_ref are the literature reference values for the chosen actinometer
+(e.g. ε_ref = 1.09 × 10⁴ L mol⁻¹ cm⁻¹ at 562 nm for Actinometer 2).
+A_initial(λ) is linearly interpolated from the measured initial spectrum at each
+LED wavelength point.  This scaling is valid because Beer–Lambert gives
+A = ε·l·c, so ε(λ)/ε_ref = A(λ)/A_ref for any fixed l and c.
+</p>
+
+<div class="warn">
+<b>Important:</b> The initial spectrum must be a full-wavelength scan of the
+actinometer <em>before</em> irradiation, not the kinetic data file itself.
+For scanning kinetics the first group average is used automatically.
+For fixed-wavelength kinetic data an explicit initial spectrum file must be provided.
+</div>
+
+<h2>QY_eff and ε_eff (for display)</h2>
+<p>
+The software reports two summary quantities for inspection (they do not directly
+enter the ODE — the ODE uses the full per-wavelength ε(λ) and QY(λ)):
+</p>
+<pre class="eq">QY_eff = ∫ f_norm(λ) · QY(λ) dλ       (flux-weighted QY over valid range)
+ε_eff  = ∫ f_norm(λ) · ε(λ) dλ        (flux-weighted ε over valid range)</pre>
+<p>
+where f_norm(λ) is f(λ) renormalised to integrate to 1 over the valid range only
+(LED wavelengths where the actinometer QY is defined).  These averages give an
+intuitive single-number summary of the spectral conditions.
+</p>
+
+<h2>Flux Fraction</h2>
+<p>
+The fraction of the total LED photon flux that falls within the actinometer's valid
+wavelength range is reported as <b>flux fraction</b>:
+</p>
+<pre class="eq">flux fraction = ∫_valid f(λ) dλ</pre>
+<p>
+where f(λ) is the original (non-renormalised) LED photon-flux spectrum.
+The ODE driving integral ∫ f(λ)·QY(λ)·(1−10^(−ε(λ)·l·[C])) dλ uses f(λ) directly,
+so photons outside the valid range (where QY = 0) contribute nothing and the flux
+fraction is automatically embedded.  A flux fraction below ~0.85 should be noted
+as it means a significant portion of the LED output is not driving the actinometry
+reaction.
+</p>
+
+<h2>Monitoring Wavelength and Offset Correction</h2>
+<p>
+The monitored absorbance A_mon(t) is measured at the channel wavelength λ_mon.
+For kinetic data files with wavelength-encoded headers (e.g. <code>Sample_1_375nm</code>),
+λ_mon is parsed automatically.  For single-channel files with plain headers
+(e.g. <code>Sample 1</code>), the monitoring wavelength must be set manually
+in the kinetic parameters panel.
+</p>
+<p>
+An offset correction aligns the first kinetic absorbance value with the initial
+spectrum at λ_mon:
+</p>
+<pre class="eq">offset = A_initial(λ_mon) − mean(A_kin[0:5])</pre>
+<p>
+This removes any drift between the initial spectrum measurement and the start of
+the kinetic experiment.  ε(λ_mon) is used only for this correction and for
+converting [C] ↔ A_mon during the ODE fit; it does not appear in QY_eff or the
+driving integral.
+</p>
+
+<h2>Uncertainty Estimation</h2>
+<p>
+After finding the optimal N_total, the uncertainty σ_N is estimated from the
+numerical Jacobian of the predicted absorbance with respect to N:
+</p>
+<pre class="eq">J_i = dA_mon_pred(t_i) / dN      (computed by finite difference)
+σ_res = √(SSR / (n − 1))         (residual standard deviation)
+σ_N   = σ_res / √(Σ J_i²)</pre>
+<p>
+This is the standard propagation-of-uncertainty formula for a one-parameter
+nonlinear fit, equivalent to the square root of the diagonal of the covariance
+matrix (J^T J)⁻¹ · σ_res².
+</p>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_LED["LED Actinometry — Input Files & Setup"] = f"""
+<h1>LED Actinometry — Input Files and Setup</h1>
+
+<h2>Stage 1: LED Characterisation (prerequisite)</h2>
+<p>
+Run the LED Characterisation tab first to obtain the spectral photon-flux result.
+This provides the normalised emission shape f(λ) and λ_eff used throughout the
+actinometry calculation.  The characterisation result is passed automatically
+from Stage 1 to Stage 2.
+</p>
+
+<h2>Stage 2: Actinometry Data</h2>
+
+<h3>Data Types</h3>
+<table>
+  <tr><th>Type</th><th>Instrument mode</th><th>Initial spectrum needed?</th></tr>
+  <tr>
+    <td><code>Scanning kinetics</code></td>
+    <td>Cary 60 multi-scan mode — full spectrum recorded at each time point,
+        grouped into time steps.</td>
+    <td>No — first group used automatically.</td>
+  </tr>
+  <tr>
+    <td><code>Kinetic (fixed λ)</code></td>
+    <td>Cary 60 kinetics mode — absorbance recorded at fixed wavelength(s)
+        vs time.</td>
+    <td><b>Yes</b> — must supply a separate initial spectrum CSV.</td>
+  </tr>
+</table>
+
+<h3>Kinetic CSV Format (fixed-λ mode)</h3>
+<pre>Row 0:   channel labels    e.g.  Sample_1_375nm  ,  (blank)  ,  Sample_1_672nm  ,  (blank)
+Row 1:   column headers    Time (sec) , Abs , Time (sec) , Abs , …
+Rows 2+: data              0.0 , 1.423 , 0.0 , 0.812 , …</pre>
+<p>
+Each pair of columns is one monitoring channel.  The wavelength is parsed from the
+label suffix (e.g. <code>375nm</code> → 375 nm).  For single-channel files
+(<code>Sample 1</code> with no wavelength suffix), set the
+<b>Monitoring wavelength</b> spinbox manually before running.
+</p>
+
+<h3>Initial Spectrum CSV Format (fixed-λ mode)</h3>
+<p>
+A standard Cary 60 full-spectrum scan CSV of the actinometer solution
+<em>before</em> irradiation (t = 0).  Must cover the LED emission range.
+</p>
+
+<h3>Integration Mode Choice</h3>
+<table>
+  <tr><th>Setting</th><th>Recommendation</th></tr>
+  <tr>
+    <td><code>scalar</code></td>
+    <td>Use only for quick checks or very narrow LEDs (&lt; 5 nm FWHM).
+        Assumes all photons arrive at the flux-weighted centroid λ_eff.</td>
+  </tr>
+  <tr>
+    <td><code>spectral</code></td>
+    <td>Always preferred.  Integrates the full LED spectrum with per-wavelength
+        QY(λ), ε(λ), and exact fraction absorbed.  Requires the LED emission
+        spectrum to overlap with the actinometer valid range.</td>
+  </tr>
+</table>
+
+<h3>Key Parameters</h3>
+<table>
+  <tr><th>Parameter</th><th>Meaning</th><th>Typical value</th></tr>
+  <tr><td>Volume (mL)</td><td>Actinometer solution volume in cuvette</td><td>3.0 mL</td></tr>
+  <tr><td>Path length (cm)</td><td>Optical path of the cuvette</td><td>1.0 cm</td></tr>
+  <tr><td>Fit start / end (s)</td><td>Restrict the kinetic window used for fitting.
+      Set to 0 to use all data.</td><td>0 / 0</td></tr>
+  <tr><td>Monitoring wavelength (nm)</td><td>Override for single-channel kinetic files
+      with no wavelength in the header.  Set to 0 for auto-detect.</td><td>0 (auto)</td></tr>
+  <tr><td>Wavelength tolerance (nm)</td><td>Search window for extracting absorbance
+      at a target wavelength from the spectrum.</td><td>2.0 nm</td></tr>
+</table>
+
+<h2>Results</h2>
+<table>
+  <tr><th>Column</th><th>Description</th></tr>
+  <tr><td>N_chem (mol s⁻¹)</td><td>Chemically determined photon flux from the ODE fit</td></tr>
+  <tr><td>N_std (mol s⁻¹)</td><td>1σ uncertainty from the Jacobian propagation</td></tr>
+  <tr><td>N_LED (mol s⁻¹)</td><td>Physical flux from LED characterisation (power meter + spectrum)</td></tr>
+  <tr><td>Deviation (%)</td><td>(N_chem − N_LED) / N_LED × 100</td></tr>
+  <tr><td>R²</td><td>Coefficient of determination of the ODE fit on A_mon(t)</td></tr>
+  <tr><td>λ_eff (nm)</td><td>Flux-weighted LED centroid wavelength</td></tr>
+  <tr><td>λ_mon (nm)</td><td>Monitoring wavelength used for A_mon(t)</td></tr>
+  <tr><td>ε_eff</td><td>Flux-weighted average ε over valid LED range (display only)</td></tr>
+  <tr><td>QY_eff</td><td>Flux-weighted average QY over valid LED range (display only)</td></tr>
+</table>
+
+<div class="note">
+<b>Interpretation of deviation:</b>
+A deviation of ±5 % is typical for well-controlled measurements.  Larger deviations
+may indicate: LED warm-up drift (measure power before <em>and</em> after irradiation);
+beam geometry mismatch between power-meter probe and cuvette; actinometer degradation
+or concentration error; or LED emission outside the actinometer valid range
+(low flux fraction).
+</div>
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

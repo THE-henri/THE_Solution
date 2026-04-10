@@ -1365,6 +1365,14 @@ class _LEDActinometryPanel(QWidget):
             info_title="Fit end (s)",
             info_text="Kinetic data after this time is excluded from the linear fit.\n"
                       "Set to 0 to use all data up to the end of the time series.")
+        self._mon_wl_spin = self._dspin(
+            fit_spin_row, "Monitoring wavelength (nm)", 0.0, 1100.0, 0.0, 1.0, decimals=1, pref=True,
+            info_title="Monitoring wavelength (nm)",
+            info_text="Wavelength at which absorbance is monitored in the kinetic CSV.\n\n"
+                      "Set to 0 to auto-detect from channel labels (e.g. 'Sample_1_375nm').\n\n"
+                      "Set to a non-zero value when the CSV has a single channel with no\n"
+                      "wavelength in the header (e.g. 'Sample 1') — common when only one\n"
+                      "wavelength was recorded.")
         fit_spin_row.addStretch()
         kin_layout.addLayout(fit_spin_row)
 
@@ -1460,16 +1468,17 @@ class _LEDActinometryPanel(QWidget):
         self._stage3.add_widget(self._plot)
 
         # Results table
-        self._res_table = QTableWidget(0, 13)
+        self._res_table = QTableWidget(0, 15)
         self._res_table.setHorizontalHeaderLabels([
-            "File", "Actinometer", "Mode", "λ_eff (nm)",
-            "ε_eff (M⁻¹cm⁻¹)", "QY_eff",
+            "File", "Channel", "Actinometer", "Mode",
+            "λ_eff (nm)", "λ_mon (nm)",
+            "ε(λ_mon) (M⁻¹cm⁻¹)", "QY_eff",
             "N_chem (mol s⁻¹)", "N_std (mol s⁻¹)", "R²", "Intercept (mol)",
             "N_LED (mol s⁻¹)", "N_LED std (mol s⁻¹)", "Deviation (%)",
         ])
         rh = self._res_table.horizontalHeader()
         rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, 13):
+        for c in range(1, 15):
             rh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self._res_table.setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
@@ -1715,6 +1724,7 @@ class _LEDActinometryPanel(QWidget):
                         else None)
         fit_start    = self._fit_start_spin.value() or None   # 0.0 → None
         fit_end      = self._fit_end_spin.value() or None     # 0.0 → None
+        mon_wl       = self._mon_wl_spin.value()               # 0.0 → auto
         N_LED        = r.N_mol_s
         N_LED_std    = r.N_std_mol_s
 
@@ -1730,7 +1740,7 @@ class _LEDActinometryPanel(QWidget):
             results = []
             for fp in files:
                 print(f"\n{'='*50}\nLED actinometry: {fp.name}")
-                res = run_led_actinometry_file(
+                res_list = run_led_actinometry_file(
                     filepath=fp,
                     actinometer_choice=act_key,
                     led_wl_arr=led_wl,
@@ -1749,8 +1759,9 @@ class _LEDActinometryPanel(QWidget):
                     fit_time_end_s=fit_end,
                     N_LED_mol_s=N_LED,
                     N_LED_std_mol_s=N_LED_std,
+                    monitoring_wavelength_nm=mon_wl,
                 )
-                results.append(res)
+                results.extend(res_list)
             return results
 
         self._worker = Worker(_run_all)
@@ -1794,9 +1805,11 @@ class _LEDActinometryPanel(QWidget):
                 n_led_str = n_led_std_str = dev_str = "—"
             vals = [
                 r.file,
+                r.channel or "—",
                 r.actinometer_name,
                 r.integration_mode,
                 f"{r.lam_eff:.1f}",
+                f"{r.lam_mon:.1f}",
                 f"{r.epsilon_eff_M_cm:.4e}",
                 f"{r.QY_eff:.4f}",
                 f"{r.photon_flux_mol_s:.4e}",
