@@ -138,16 +138,21 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
                  transform=ax1.transAxes, fontsize=12, verticalalignment='top')
 
     if popt is not None:
+        def _fmt(v):
+            """Format a value: fixed 4 dp if |v| < 1000, scientific otherwise."""
+            return f"{v:.4e}" if abs(v) >= 1000 or (v != 0 and abs(v) < 1e-3) \
+                   else f"{v:.4f}"
+
         if switch == "negative":
             A0, A_inf_p, k = popt[0], popt[1], popt[2]
             eq_line   = r"$A(t)=A_\infty+(A_0-A_\infty)\,e^{-kt}$"
-            param_lines = (f"$A_0$ = {A0:.4f}\n"
-                           f"$A_\\infty$ = {A_inf_p:.4f}\n"
+            param_lines = (f"$A_0$ = {_fmt(A0)}\n"
+                           f"$A_\\infty$ = {_fmt(A_inf_p)}\n"
                            f"$k$ = {k:.4f} s$^{{-1}}$")
         else:
             A0, k = popt[0], popt[1]
             eq_line   = r"$A(t)=A_0\,e^{-kt}$"
-            param_lines = (f"$A_0$ = {A0:.4f}\n"
+            param_lines = (f"$A_0$ = {_fmt(A0)}\n"
                            f"$k$ = {k:.4f} s$^{{-1}}$")
 
         t_half_line = f"$t_{{1/2}}$ = {t_half:.2f} s" if t_half is not None else ""

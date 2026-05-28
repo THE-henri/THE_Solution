@@ -55,10 +55,11 @@ class _ThermalPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._output_path: Optional[Path] = None
-        self._master_csv:  Optional[Path] = None
-        self._result = None
-        self._worker: Optional[Worker] = None
+        self._output_path:  Optional[Path] = None
+        self._master_csv:   Optional[Path] = None
+        self._result        = None
+        self._worker:       Optional[Worker] = None
+        self._compound_name: str = "Unknown"
         self._build_ui()
 
     # ── Build ──────────────────────────────────────────────────────────────
@@ -126,35 +127,22 @@ class _ThermalPanel(QWidget):
         self._stage2 = StageCard("Stage 2 — Parameters")
         self._stage2.add_info_button(
             "Analysis Parameters",
-            "Compound name: used for plot titles and output file names.\n\n"
+            "Compound name is taken from the project header.\n\n"
             "Weighted fit: when multiple k values exist at the same temperature "
             "(replicates), use inverse-variance weighting in the linear regression. "
             "Recommended when n > 1 per temperature point."
         )
 
-        param_row = QHBoxLayout()
-        cmp_col = QVBoxLayout()
-        cmp_col.setSpacing(4)
-        _cmp_lbl_row = QHBoxLayout()
-        _cmp_lbl = QLabel("Compound name")
+        cmp_row = QHBoxLayout()
+        _cmp_lbl = QLabel("Compound:")
         _cmp_lbl.setObjectName("pref_label")
-        _cmp_lbl_row.addWidget(_cmp_lbl)
-        _cmp_lbl_row.addWidget(InfoButton(
-            "Compound name",
-            "Name of the compound — used in plot titles and output file names.\n"
-            "Does not affect the calculation.",
-        ))
-        _cmp_lbl_row.addStretch()
-        cmp_col.addLayout(_cmp_lbl_row)
-        self._compound_edit = QLineEdit("")
-        self._compound_edit.setMinimumWidth(200)
-        self._compound_edit.setPlaceholderText("e.g. AZA-SO2Me")
-        cmp_col.addWidget(self._compound_edit)
-        param_row.addLayout(cmp_col)
+        cmp_row.addWidget(_cmp_lbl)
+        self._compound_name_lbl = QLabel(self._compound_name)
+        self._compound_name_lbl.setStyleSheet("color:#5b8dee; font-size:9pt;")
+        cmp_row.addWidget(self._compound_name_lbl)
+        cmp_row.addStretch()
+        self._stage2.add_layout(cmp_row)
 
-        wt_col = QVBoxLayout()
-        wt_col.setSpacing(4)
-        wt_col.addWidget(QLabel(""))   # vertical alignment spacer
         _wt_row = QHBoxLayout()
         self._weighted_chk = QCheckBox("Weighted fit  (uses k SEM when n > 1)")
         self._weighted_chk.setObjectName("pref_cb")
@@ -163,17 +151,13 @@ class _ThermalPanel(QWidget):
         _wt_row.addWidget(InfoButton(
             "Weighted fit",
             "When enabled and multiple k values exist at a temperature, each\n"
-            "data point is weighted by 1/SEM² before fitting.\n\n"
+            "data point is weighted by 1/SEM\u00b2 before fitting.\n\n"
             "Recommended when temperature replicates have different uncertainties.\n"
             "Turn off to treat all points equally (ordinary least squares).",
         ))
         _wt_row.addStretch()
-        wt_col.addLayout(_wt_row)
-        param_row.addLayout(wt_col)
-        param_row.addStretch()
-        self._stage2.add_layout(param_row)
+        self._stage2.add_layout(_wt_row)
 
-        self._compound_edit.textChanged.connect(self._mark_stale)
         self._weighted_chk.stateChanged.connect(self._mark_stale)
 
         self._stage2.set_status(READY)
@@ -206,7 +190,14 @@ class _ThermalPanel(QWidget):
         self._save_btn = QPushButton("Save results CSV")
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self._save_csv)
+        self._save_pub_btn = QPushButton("Save publication data")
+        self._save_pub_btn.setEnabled(False)
+        self._save_pub_btn.setToolTip(
+            "Save plot_data.csv (linearised data + fit line) and\n"
+            "k_table.csv (k ± std, t½ in s / min / h / days) for each temperature.")
+        self._save_pub_btn.clicked.connect(self._save_pub_data)
         save_row.addWidget(self._save_btn)
+        save_row.addWidget(self._save_pub_btn)
         save_row.addStretch()
         self._stage3.add_layout(save_row)
 
@@ -288,11 +279,12 @@ class _ThermalPanel(QWidget):
     def _run(self):
         if self._master_csv is None:
             return
-        compound = self._compound_edit.text().strip() or "Unknown"
+        compound = self._compound_name or "Unknown"
         weighted = self._weighted_chk.isChecked()
 
         self._run_btn.setEnabled(False)
         self._save_btn.setEnabled(False)
+        self._save_pub_btn.setEnabled(False)
         self._status_lbl.setText("Running…")
         self._stage3.set_status(WAITING)
 
@@ -316,11 +308,14 @@ class _ThermalPanel(QWidget):
         self._plot.set_default_filename(self._result_filename(result))
         self._plot.set_figure(fig)
         self._stage3.set_status(DONE)
+        t25 = result.t_half_25C_s
         self._status_lbl.setText(
             f"Done — {result.n_temperatures} temperatures  "
             f"({'weighted' if result.weighted else 'unweighted'})  "
-            f"R² = {result.r2:.4f}")
+            f"R² = {result.r2:.4f}  |  "
+            f"t½(25°C) = {t25:.1f} s / {t25/60:.2f} min / {t25/3600:.3f} h")
         self._save_btn.setEnabled(True)
+        self._save_pub_btn.setEnabled(True)
 
     def _on_error(self, msg: str):
         self._stage3.set_status(ERROR)
@@ -346,6 +341,54 @@ class _ThermalPanel(QWidget):
             print(f"[Thermal] CSV saved → {path}")
             self.log_signal.emit(f"[Thermal] CSV saved → {path}", "INFO")
 
+    def _save_pub_data(self):
+        """Save publication CSVs: plot_data.csv and k_table.csv."""
+        import numpy as np
+        if self._result is None:
+            return
+        out_dir = self._output_subdir() / "publication"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = self._result
+        compound = result.compound
+
+        # ── 1. plot_data.csv — linearised data points + fit line ──────────
+        plot_df = self._pub_plot_df(result)
+        plot_path = out_dir / f"{compound}_{self._pub_type()}_plot_data.csv"
+        plot_df.to_csv(plot_path, index=False)
+
+        # ── 2. k_table.csv — k stats + half-lives per temperature ─────────
+        ln2 = np.log(2)
+        rows = []
+        for T_C, k_mean, k_std, n in zip(
+                result.T_C_list, result.k_mean_list,
+                result.k_std_list, result.n_list):
+            t_half_s   = ln2 / k_mean
+            # Propagate std:  σ(t½) = (ln2 / k²) · σ_k = t½ · (σ_k / k)
+            if k_std is not None and k_mean > 0:
+                t_half_std_s = t_half_s * (k_std / k_mean)
+            else:
+                t_half_std_s = None
+            rows.append({
+                "Temperature_C":    T_C,
+                "n_replicates":     n,
+                "k_mean_s-1":       k_mean,
+                "k_std_s-1":        k_std if k_std is not None else "",
+                "t_half_s":         t_half_s,
+                "t_half_std_s":     t_half_std_s if t_half_std_s is not None else "",
+                "t_half_min":       t_half_s / 60.0,
+                "t_half_std_min":   t_half_std_s / 60.0 if t_half_std_s is not None else "",
+                "t_half_h":         t_half_s / 3600.0,
+                "t_half_std_h":     t_half_std_s / 3600.0 if t_half_std_s is not None else "",
+                "t_half_days":      t_half_s / 86400.0,
+                "t_half_std_days":  t_half_std_s / 86400.0 if t_half_std_s is not None else "",
+            })
+        ktable_path = out_dir / f"{compound}_k_table.csv"
+        pd.DataFrame(rows).to_csv(ktable_path, index=False)
+
+        msg = f"Publication data saved → {out_dir}"
+        print(f"[Thermal] {msg}")
+        self.log_signal.emit(msg, "INFO")
+
     # ── Subclass hooks ─────────────────────────────────────────────────────
     # Override in ArrheniusPanel / EyringPanel
 
@@ -364,16 +407,24 @@ class _ThermalPanel(QWidget):
     def _output_subdir(self) -> Path:
         raise NotImplementedError
 
+    def _pub_plot_df(self, result) -> "pd.DataFrame":
+        raise NotImplementedError
+
+    def _pub_type(self) -> str:
+        raise NotImplementedError
+
     # ── Preferences ────────────────────────────────────────────────────────
 
-    def _apply_thermal_prefs(self, compound: str, weighted: bool):
-        self._compound_edit.blockSignals(True)
-        self._compound_edit.setText(compound)
-        self._compound_edit.blockSignals(False)
+    def set_compound_name(self, name: str):
+        self._compound_name = name
+        self._compound_name_lbl.setText(name)
+        self._mark_stale()
+
+    def _apply_thermal_prefs(self, weighted: bool):
         self._weighted_chk.setChecked(weighted)
 
-    def _collect_thermal_prefs(self) -> tuple[str, bool]:
-        return self._compound_edit.text(), self._weighted_chk.isChecked()
+    def _collect_thermal_prefs(self) -> bool:
+        return self._weighted_chk.isChecked()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -395,15 +446,20 @@ class _ArrheniusPanel(_ThermalPanel):
         return plot_arrhenius(result)
 
     def _result_to_row(self, result: ArrheniusResult) -> dict:
+        t25 = result.t_half_25C_s
         return {
-            "Compound":       result.compound,
-            "Ea_kJmol":       result.Ea_kJmol,
-            "Ea_std_kJmol":   result.Ea_std_kJmol,
-            "A_s":            result.A_s,
-            "A_std_s":        result.A_std_s,
-            "R2_Arrhenius":   result.r2,
-            "n_temperatures": result.n_temperatures,
-            "weighted":       result.weighted,
+            "Compound":           result.compound,
+            "Ea_kJmol":           result.Ea_kJmol,
+            "Ea_std_kJmol":       result.Ea_std_kJmol,
+            "A_s":                result.A_s,
+            "A_std_s":            result.A_std_s,
+            "R2_Arrhenius":       result.r2,
+            "n_temperatures":     result.n_temperatures,
+            "weighted":           result.weighted,
+            "k_25C_s-1":          result.k_25C,
+            "t_half_25C_s":       t25,
+            "t_half_25C_min":     t25 / 60.0,
+            "t_half_25C_h":       t25 / 3600.0,
         }
 
     def _result_filename(self, result: ArrheniusResult) -> str:
@@ -413,14 +469,31 @@ class _ArrheniusPanel(_ThermalPanel):
         base = self._output_path or Path.home()
         return base / "arrhenius" / "results"
 
+    def _pub_type(self) -> str:
+        return "Arrhenius"
+
+    def _pub_plot_df(self, result: ArrheniusResult) -> "pd.DataFrame":
+        import numpy as np
+        # Data points
+        yerr = result.sigma_y.tolist() if result.sigma_y is not None \
+               else [""] * len(result.x_data)
+        data_rows = pd.DataFrame({
+            "inv_T_1000K":  result.x_data,
+            "ln_k":         result.ln_k,
+            "ln_k_err":     yerr,
+        })
+        # Fit line (200 points, NaN-pad shorter columns)
+        fit_rows = pd.DataFrame({
+            "fit_inv_T_1000K": result.x_fit,
+            "fit_ln_k":        result.y_fit,
+        })
+        return pd.concat([data_rows, fit_rows], axis=1)
+
     def apply_prefs(self, prefs):
-        self._apply_thermal_prefs(
-            prefs.thermal.compound_name, prefs.thermal.weighted_fit)
+        self._apply_thermal_prefs(prefs.thermal.weighted_fit)
 
     def collect_prefs(self, prefs):
-        c, w = self._collect_thermal_prefs()
-        prefs.thermal.compound_name = c
-        prefs.thermal.weighted_fit  = w
+        prefs.thermal.weighted_fit = self._collect_thermal_prefs()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -442,15 +515,20 @@ class _EyringPanel(_ThermalPanel):
         return plot_eyring(result)
 
     def _result_to_row(self, result: EyringResult) -> dict:
+        t25 = result.t_half_25C_s
         return {
-            "Compound":       result.compound,
-            "dH_kJmol":       result.dH_kJmol,
-            "dH_std_kJmol":   result.dH_std_kJmol,
-            "dS_JmolK":       result.dS_JmolK,
-            "dS_std_JmolK":   result.dS_std_JmolK,
-            "R2_Eyring":      result.r2,
-            "n_temperatures": result.n_temperatures,
-            "weighted":       result.weighted,
+            "Compound":           result.compound,
+            "dH_kJmol":           result.dH_kJmol,
+            "dH_std_kJmol":       result.dH_std_kJmol,
+            "dS_JmolK":           result.dS_JmolK,
+            "dS_std_JmolK":       result.dS_std_JmolK,
+            "R2_Eyring":          result.r2,
+            "n_temperatures":     result.n_temperatures,
+            "weighted":           result.weighted,
+            "k_25C_s-1":          result.k_25C,
+            "t_half_25C_s":       t25,
+            "t_half_25C_min":     t25 / 60.0,
+            "t_half_25C_h":       t25 / 3600.0,
         }
 
     def _result_filename(self, result: EyringResult) -> str:
@@ -460,16 +538,29 @@ class _EyringPanel(_ThermalPanel):
         base = self._output_path or Path.home()
         return base / "eyring" / "results"
 
+    def _pub_type(self) -> str:
+        return "Eyring"
+
+    def _pub_plot_df(self, result: EyringResult) -> "pd.DataFrame":
+        import numpy as np
+        yerr = result.sigma_y.tolist() if result.sigma_y is not None \
+               else [""] * len(result.x_data)
+        data_rows = pd.DataFrame({
+            "inv_T_1000K":  result.x_data,
+            "ln_kT":        result.ln_kT,
+            "ln_kT_err":    yerr,
+        })
+        fit_rows = pd.DataFrame({
+            "fit_inv_T_1000K": result.x_fit,
+            "fit_ln_kT":       result.y_fit,
+        })
+        return pd.concat([data_rows, fit_rows], axis=1)
+
     def apply_prefs(self, prefs):
-        self._apply_thermal_prefs(
-            prefs.thermal.compound_name, prefs.thermal.weighted_fit)
+        self._apply_thermal_prefs(prefs.thermal.weighted_fit)
 
     def collect_prefs(self, prefs):
-        # Eyring and Arrhenius share the same prefs block; writing here is
-        # idempotent since both store the same fields.
-        c, w = self._collect_thermal_prefs()
-        prefs.thermal.compound_name = c
-        prefs.thermal.weighted_fit  = w
+        prefs.thermal.weighted_fit = self._collect_thermal_prefs()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -503,6 +594,10 @@ class ThermalTab(QWidget):
     def set_output_path(self, path: Path):
         self._arrhenius_panel.set_output_path(path)
         self._eyring_panel.set_output_path(path)
+
+    def set_compound_name(self, name: str):
+        self._arrhenius_panel.set_compound_name(name)
+        self._eyring_panel.set_compound_name(name)
 
     def apply_prefs(self, prefs):
         self._arrhenius_panel.apply_prefs(prefs)

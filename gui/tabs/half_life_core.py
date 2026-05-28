@@ -428,6 +428,9 @@ class FitResult:
     n_excluded:      int
     success:         bool
     error_msg:       str = ""
+    k_linear:        Optional[float] = None
+    t_half_linear:   Optional[float] = None
+    r2_linear:       Optional[float] = None
 
 
 # ── Main fitting function ─────────────────────────────────────────────────
@@ -479,8 +482,8 @@ def run_half_life_fit(
             success=False, error_msg=msg,
         )
 
-    if len(time_sel) < 3:
-        return _blank("Too few points in selection window.")
+    if len(time_sel) < 2:
+        return _blank("Too few points in selection window (need ≥ 2).")
 
     # ── Determine A∞ ─────────────────────────────────────────────────
     if a_inf_mode == "free":
@@ -491,10 +494,7 @@ def run_half_life_fit(
     # ── Initial fit ───────────────────────────────────────────────────
     raw_result = fit_half_life(time_sel, abs_sel,
                                switch=switch, A_inf_manual=a_inf_manual)
-    # Defensive: handle 3- or 4-value return
-    if len(raw_result) == 3:
-        raw_result = (*raw_result, None)
-    popt_init, t_half_init, curve_init, _ = raw_result
+    popt_init, t_half_init, curve_init = raw_result[0], raw_result[1], raw_result[2]
 
     if popt_init is None or curve_init is None:
         return _blank("Initial fit failed.")
@@ -510,20 +510,24 @@ def run_half_life_fit(
           f"{n_excl}/{len(inlier_mask)} points excluded "
           f"({100*n_excl/len(inlier_mask):.1f}%)")
 
-    if len(t_clean) < 3:
-        return _blank("Too few points after outlier removal.")
+    if len(t_clean) < 2:
+        return _blank("Too few points after outlier removal (need ≥ 2).")
 
     # ── Final fit ─────────────────────────────────────────────────────
     raw_result2 = fit_half_life(t_clean, ab_clean,
                                 switch=switch, A_inf_manual=a_inf_manual)
-    if len(raw_result2) == 3:
-        raw_result2 = (*raw_result2, None)
-    popt, t_half, fitted_curve, r2 = raw_result2
+    popt, t_half, fitted_curve, r2 = raw_result2[0], raw_result2[1], raw_result2[2], raw_result2[3]
+    k_linear     = raw_result2[4] if len(raw_result2) > 4 else None
+    t_half_lin   = raw_result2[5] if len(raw_result2) > 5 else None
+    r2_linear    = raw_result2[6] if len(raw_result2) > 6 else None
 
     if popt is None:
         return _blank("Final fit failed after outlier removal.")
 
-    print(f"  {label}: t½ = {t_half:.2f} s   R² = {r2:.6f}")
+    print(f"  {label}: t½ = {t_half:.2f} s   R² (exp) = {r2:.6f}")
+    if k_linear is not None:
+        r2_lin_str = f"{r2_linear:.6f}" if r2_linear is not None else "n/a"
+        print(f"  {label}: t½ (linear) = {t_half_lin:.2f} s   k (linear) = {k_linear:.6f} s⁻¹   R² (linear) = {r2_lin_str}")
 
     return FitResult(
         label=label, switch=switch, popt=popt, t_half=t_half,
@@ -535,6 +539,9 @@ def run_half_life_fit(
         start_idx=start_idx, end_idx=end_idx,
         temperature_c=temperature_c, n_excluded=n_excl,
         success=True,
+        k_linear=k_linear,
+        t_half_linear=t_half_lin,
+        r2_linear=r2_linear,
     )
 
 

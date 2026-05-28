@@ -21,12 +21,15 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import os
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLabel, QLineEdit, QPushButton, QCheckBox, QComboBox,
     QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
-    QGroupBox,
+    QGroupBox, QRadioButton, QButtonGroup,
+    QListWidget, QListWidgetItem, QMenu,
 )
 
 from gui.tabs.spectra_core import (
@@ -63,15 +66,23 @@ class SpectraTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._output_path:    Optional[Path] = None
-        self._initial_files:  list[Path]     = []
-        self._irrad_files:    list[Path]     = []
-        self._pss_files:      list[Path]     = []
+        self._raw_path:       Optional[Path] = None
+        self._initial_files:     list[Path]  = []
+        self._irrad_files:       list[Path]  = []
+        self._irrad_labels:      list[str]   = []
+        self._irrad_sources:     list[Path]  = []
+        self._irrad_disabled_idx: set[int]   = set()
+        self._pss_files:         list[Path]  = []
         self._grid:           Optional[np.ndarray] = None
         self._S_A:            Optional[np.ndarray] = None
         self._series:         Optional[np.ndarray] = None
         self._S_PSS:          Optional[np.ndarray] = None
         self._result:         Optional[SpectraResult] = None
         self._worker:         Optional[Worker] = None
+        # EC spectrum for concentration calculation
+        self._ec_wl_arr:      Optional[np.ndarray] = None
+        self._ec_eps_arr:     Optional[np.ndarray] = None
+        self._ec_computed_conc: Optional[float]    = None
         self._build_ui()
 
     # ── Build ──────────────────────────────────────────────────────────────
@@ -115,9 +126,11 @@ class SpectraTab(QWidget):
 
         hint = QLabel(
             "Select the CSV files for each group.\n"
-            "Initial spectrum: one or more scans of pure species A.\n"
-            "Irradiation series: scans taken during photolysis (sorted by filename).\n"
-            "PSS files: only required for positive_pss mode."
+            "Initial spectrum: one or more scans of pure species A (required).\n"
+            "Irradiation series: scans during photolysis (sorted by filename). "
+            "Optional when only a PSS spectrum is available.\n"
+            "PSS files: required for positive_pss mode; also used by negative mode "
+            "when no irradiation series is loaded (single-spectrum path)."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#888; font-size:9pt;")
@@ -147,7 +160,7 @@ class SpectraTab(QWidget):
 
         # ── PSS files (optional)
         pss_row = QHBoxLayout()
-        self._pss_btn = QPushButton("Select PSS files… (optional)")
+        self._pss_btn = QPushButton("Select PSS files…")
         self._pss_btn.setFixedWidth(200)
         self._pss_btn.clicked.connect(self._select_pss)
         self._pss_lbl = QLabel("None selected")
@@ -177,6 +190,26 @@ class SpectraTab(QWidget):
         self._overview_plot.setMinimumHeight(300)
         self._overview_plot.hide()
         self._stage1.add_widget(self._overview_plot)
+
+        # Spectrum toggle list (shown after loading)
+        self._spectra_list_lbl = QLabel(
+            "Uncheck individual spectra to exclude them from the extraction.  "
+            "Right-click to open the source file.")
+        self._spectra_list_lbl.setStyleSheet("color:#888; font-size:8pt;")
+        self._spectra_list_lbl.setWordWrap(True)
+        self._spectra_list_lbl.hide()
+        self._stage1.add_widget(self._spectra_list_lbl)
+
+        self._irrad_list = QListWidget()
+        self._irrad_list.setMaximumHeight(160)
+        self._irrad_list.setStyleSheet("font-size:8pt;")
+        self._irrad_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._irrad_list.customContextMenuRequested.connect(
+            self._spectra_context_menu)
+        self._irrad_list.itemChanged.connect(self._on_spectra_item_toggled)
+        self._irrad_list.hide()
+        self._stage1.add_widget(self._irrad_list)
 
         parent_layout.addWidget(self._stage1)
 
@@ -272,10 +305,22 @@ class SpectraTab(QWidget):
         self._path_length_spin.setDecimals(3)
         self._path_length_spin.setValue(1.0)
         self._path_length_spin.setFixedWidth(90)
+        self._path_length_spin.valueChanged.connect(self._update_computed_conc)
         c2.addWidget(self._path_length_spin)
-        c2.addSpacing(20)
-        c2.addWidget(QLabel("Concentration (mol/L, blank = absorbance output):"))
-        c2.addWidget(InfoButton(
+        c2.addStretch()
+        shared_lay.addLayout(c2)
+
+        # ── Concentration source ───────────────────────────────────────────
+        conc_mode_row = QHBoxLayout()
+        conc_mode_row.setSpacing(8)
+        self._conc_manual_rb = QRadioButton("Concentration (mol/L):")
+        self._conc_manual_rb.setChecked(True)
+        self._conc_ec_rb     = QRadioButton("Compute from \u03b5 spectrum")
+        _conc_bg = QButtonGroup(self)
+        _conc_bg.addButton(self._conc_manual_rb)
+        _conc_bg.addButton(self._conc_ec_rb)
+        conc_mode_row.addWidget(self._conc_manual_rb)
+        conc_mode_row.addWidget(InfoButton(
             "Concentration (mol/L)",
             "Solution concentration in mol/L.\n"
             "When provided, extracted spectra are output in units of\n"
@@ -283,11 +328,58 @@ class SpectraTab(QWidget):
             "Leave blank to output in raw absorbance units.",
         ))
         self._conc_edit = QLineEdit()
-        self._conc_edit.setPlaceholderText("leave blank for absorbance")
-        self._conc_edit.setFixedWidth(200)
-        c2.addWidget(self._conc_edit)
-        c2.addStretch()
-        shared_lay.addLayout(c2)
+        self._conc_edit.setPlaceholderText("leave blank for absorbance units")
+        self._conc_edit.setFixedWidth(180)
+        conc_mode_row.addWidget(self._conc_edit)
+        conc_mode_row.addSpacing(20)
+        conc_mode_row.addWidget(self._conc_ec_rb)
+        conc_mode_row.addWidget(InfoButton(
+            "Compute concentration from \u03b5 spectrum",
+            "Load an extinction coefficient spectrum CSV (from the Extinction\n"
+            "Coefficient tab or any CSV with Wavelength and \u03b5 columns).\n\n"
+            "Choose a reference wavelength \u03bb. The concentration is then\n"
+            "computed as:\n"
+            "  c = A(\u03bb) / (\u03b5(\u03bb) \u00d7 l)\n\n"
+            "where A(\u03bb) is read from the averaged initial spectrum and \u03b5(\u03bb)\n"
+            "is interpolated from the loaded \u03b5 spectrum. The computed\n"
+            "concentration is shown before running.",
+        ))
+        conc_mode_row.addStretch()
+        shared_lay.addLayout(conc_mode_row)
+
+        # EC spectrum row (shown only in EC mode)
+        self._ec_row_widget = QWidget()
+        ec_row = QHBoxLayout(self._ec_row_widget)
+        ec_row.setContentsMargins(24, 0, 0, 0)
+        self._ec_btn = QPushButton("Select \u03b5 spectrum CSV\u2026")
+        self._ec_btn.setFixedWidth(180)
+        self._ec_btn.clicked.connect(self._select_ec_file)
+        self._ec_file_lbl = QLabel("No file selected")
+        self._ec_file_lbl.setStyleSheet("color:#555; font-size:9pt;")
+        ec_row.addWidget(self._ec_btn)
+        ec_row.addWidget(self._ec_file_lbl, 1)
+        ec_row.addSpacing(16)
+        _ec_wl_lbl = QLabel("\u03bb for c (nm):")
+        _ec_wl_lbl.setObjectName("pref_label")
+        ec_row.addWidget(_ec_wl_lbl)
+        self._ec_wl_spin = QDoubleSpinBox()
+        self._ec_wl_spin.setRange(200.0, 1100.0)
+        self._ec_wl_spin.setDecimals(1)
+        self._ec_wl_spin.setValue(400.0)
+        self._ec_wl_spin.setFixedWidth(80)
+        self._ec_wl_spin.valueChanged.connect(self._update_computed_conc)
+        ec_row.addWidget(self._ec_wl_spin)
+        ec_row.addStretch()
+        shared_lay.addWidget(self._ec_row_widget)
+
+        # Computed concentration label
+        self._ec_conc_lbl = QLabel("")
+        self._ec_conc_lbl.setStyleSheet("color:#5b8dee; font-size:9pt; padding-left:24px;")
+        shared_lay.addWidget(self._ec_conc_lbl)
+
+        # Wire mode toggle
+        self._conc_manual_rb.toggled.connect(self._on_conc_mode_changed)
+        self._on_conc_mode_changed()  # set initial visibility
 
         self._stage2.add_widget(shared_grp)
 
@@ -534,6 +626,56 @@ class SpectraTab(QWidget):
         pss_row.addWidget(self._pss_fb_err_spin)
         pss_row.addStretch()
         pss_lay.addLayout(pss_row)
+
+        # ── Auto-compute f_B from observation wavelength (negative photoswitch)
+        pss_auto_row = QHBoxLayout()
+        self._pss_auto_fb_cb = QCheckBox(
+            "Auto-compute f_B from bleaching at observation λ (negative photoswitch)")
+        self._pss_auto_fb_cb.setObjectName("pref_cb")
+        self._pss_auto_fb_cb.setChecked(False)
+        pss_auto_row.addWidget(self._pss_auto_fb_cb)
+        pss_auto_row.addWidget(InfoButton(
+            "Auto-compute f_B from observation λ",
+            "For negative photoswitches where species A bleaches at λ_obs\n"
+            "and species B has negligible absorbance there:\n\n"
+            "  f_B = 1 − A_PSS(λ_obs) / A₀(λ_obs)\n\n"
+            "Set λ_obs to the peak absorption wavelength of species A.\n"
+            "Requires initial and PSS spectra to be loaded (Stage 1).\n"
+            "The ± error field above still sets the f_B uncertainty.",
+        ))
+        pss_auto_row.addStretch()
+        pss_lay.addLayout(pss_auto_row)
+
+        self._pss_obs_row = QWidget()
+        obs_row = QHBoxLayout(self._pss_obs_row)
+        obs_row.setContentsMargins(24, 0, 0, 0)
+        _obs_lbl = QLabel("Observation λ (nm):")
+        _obs_lbl.setObjectName("pref_label")
+        obs_row.addWidget(_obs_lbl)
+        obs_row.addWidget(InfoButton(
+            "Observation wavelength",
+            "Wavelength used to calculate f_B from the bleaching ratio.\n"
+            "Choose the maximum absorbance of species A where species B\n"
+            "is transparent.",
+        ))
+        self._pss_obs_wl_spin = QDoubleSpinBox()
+        self._pss_obs_wl_spin.setRange(200.0, 1100.0)
+        self._pss_obs_wl_spin.setDecimals(1)
+        self._pss_obs_wl_spin.setValue(400.0)
+        self._pss_obs_wl_spin.setFixedWidth(80)
+        self._pss_obs_wl_spin.valueChanged.connect(self._update_auto_fb)
+        obs_row.addWidget(self._pss_obs_wl_spin)
+        obs_row.addStretch()
+        pss_lay.addWidget(self._pss_obs_row)
+
+        self._pss_auto_fb_lbl = QLabel("")
+        self._pss_auto_fb_lbl.setStyleSheet(
+            "color:#5b8dee; font-size:9pt; padding-left:24px;")
+        pss_lay.addWidget(self._pss_auto_fb_lbl)
+
+        self._pss_auto_fb_cb.toggled.connect(self._on_pss_auto_fb_changed)
+        self._on_pss_auto_fb_changed()
+
         self._stage2.add_widget(self._pss_grp)
 
         # Initial mode visibility
@@ -630,9 +772,20 @@ class SpectraTab(QWidget):
 
     # ── File selection ────────────────────────────────────────────────────────
 
+    def _file_start_dir(self) -> str:
+        """Return the best starting directory for file dialogs."""
+        # Prefer the directory of already-selected files, then raw path, then home
+        for files in (self._initial_files, self._irrad_files, self._pss_files):
+            if files:
+                return str(files[0].parent)
+        if self._raw_path and self._raw_path.exists():
+            return str(self._raw_path)
+        return str(Path.home())
+
     def _select_initial(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select initial spectrum files", "", "CSV files (*.csv)")
+            self, "Select initial spectrum files",
+            self._file_start_dir(), "CSV files (*.csv)")
         if paths:
             self._initial_files = [Path(p) for p in paths]
             self._initial_lbl.setText(_files_label(self._initial_files))
@@ -640,15 +793,62 @@ class SpectraTab(QWidget):
 
     def _select_irrad(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select irradiation series files", "", "CSV files (*.csv)")
+            self, "Select irradiation series files",
+            self._file_start_dir(), "CSV files (*.csv)")
         if paths:
             self._irrad_files = [Path(p) for p in paths]
             self._irrad_lbl.setText(_files_label(self._irrad_files))
             self._reset_loaded()
 
+    def _populate_spectra_list(self, labels: list[str], sources: list[Path]):
+        self._irrad_labels  = labels
+        self._irrad_sources = sources
+        self._irrad_disabled_idx.clear()
+        self._irrad_list.blockSignals(True)
+        self._irrad_list.clear()
+        for idx, (label, src) in enumerate(zip(labels, sources)):
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, (idx, src))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setToolTip(str(src))
+            self._irrad_list.addItem(item)
+        self._irrad_list.blockSignals(False)
+        if labels:
+            self._irrad_list.show()
+            self._spectra_list_lbl.show()
+        else:
+            self._irrad_list.hide()
+            self._spectra_list_lbl.hide()
+
+    def _on_spectra_item_toggled(self, item: QListWidgetItem):
+        idx, _src = item.data(Qt.ItemDataRole.UserRole)
+        if item.checkState() == Qt.CheckState.Unchecked:
+            self._irrad_disabled_idx.add(idx)
+        else:
+            self._irrad_disabled_idx.discard(idx)
+        # Update label to show how many are active
+        total  = len(self._irrad_labels)
+        active = total - len(self._irrad_disabled_idx)
+        base   = _files_label(self._irrad_files)
+        self._irrad_lbl.setText(
+            base if active == total else f"{base}  ({active}/{total} spectra active)")
+
+    def _spectra_context_menu(self, pos):
+        item = self._irrad_list.itemAt(pos)
+        if item is None:
+            return
+        _idx, src = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        open_act = menu.addAction("Open source file")
+        action = menu.exec(self._irrad_list.mapToGlobal(pos))
+        if action == open_act:
+            os.startfile(str(src))
+
     def _select_pss(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select PSS spectrum files", "", "CSV files (*.csv)")
+            self, "Select PSS spectrum files",
+            self._file_start_dir(), "CSV files (*.csv)")
         if paths:
             self._pss_files = [Path(p) for p in paths]
             self._pss_lbl.setText(_files_label(self._pss_files))
@@ -659,10 +859,15 @@ class SpectraTab(QWidget):
         self._S_A    = None
         self._series = None
         self._S_PSS  = None
+        self._irrad_labels      = []
+        self._irrad_sources     = []
+        self._irrad_disabled_idx.clear()
         self._stage1.set_status(WAITING)
         self._stage2.set_status(WAITING)
         self._stage3.set_status(WAITING)
         self._overview_plot.hide()
+        self._irrad_list.hide()
+        self._spectra_list_lbl.hide()
         self._result_plot.hide()
         self._diag_plot1.hide()
         self._diag_plot2.hide()
@@ -675,15 +880,51 @@ class SpectraTab(QWidget):
         self._pca_grp.setVisible(mode in ("negative_pca", "positive_pca"))
         self._pss_grp.setVisible(mode == "positive_pss")
 
+    def _on_pss_auto_fb_changed(self):
+        auto = self._pss_auto_fb_cb.isChecked()
+        self._pss_fb_spin.setEnabled(not auto)
+        self._pss_obs_row.setVisible(auto)
+        self._pss_auto_fb_lbl.setVisible(auto)
+        self._update_auto_fb()
+
+    def _update_auto_fb(self):
+        """Compute and display f_B = 1 − A_PSS(λ) / A₀(λ) for the PSS auto mode."""
+        self._pss_auto_fb_lbl.setText("")
+        if (not self._pss_auto_fb_cb.isChecked()
+                or self._S_A is None or self._S_PSS is None
+                or self._grid is None):
+            return
+        lam      = self._pss_obs_wl_spin.value()
+        sa_obs   = float(np.interp(lam, self._grid, self._S_A))
+        spss_obs = float(np.interp(lam, self._grid, self._S_PSS))
+        if sa_obs <= 0:
+            self._pss_auto_fb_lbl.setText(
+                f"A₀({lam:.0f} nm) ≤ 0 — choose a wavelength where species A absorbs")
+            return
+        f_B = 1.0 - spss_obs / sa_obs
+        if not (0.01 < f_B < 0.99):
+            self._pss_auto_fb_lbl.setText(
+                f"  f_B = {f_B:.3f} — out of valid range (0.01–0.99), adjust λ_obs")
+            return
+        self._pss_auto_fb_lbl.setText(
+            f"  → f_B = {f_B:.4f}   "
+            f"[A₀({lam:.0f} nm) = {sa_obs:.4f},  "
+            f"A_PSS({lam:.0f} nm) = {spss_obs:.4f}]")
+
     # ── Load data ─────────────────────────────────────────────────────────────
 
     def _load_data(self):
         if not self._initial_files:
             self._load_status_lbl.setText("Select initial spectrum files first.")
             return
-        if not self._irrad_files:
-            self._load_status_lbl.setText("Select irradiation series files first.")
-            return
+        mode = self._mode_combo.currentText()
+        if not self._irrad_files and mode != "positive_pss":
+            if not self._pss_files:
+                self._load_status_lbl.setText(
+                    "Select irradiation series files first — or, for PSS-only "
+                    "extraction (negative / positive_pss modes), load only "
+                    "initial + PSS files.")
+                return
 
         if self._worker and self._worker.isRunning():
             return
@@ -695,14 +936,19 @@ class SpectraTab(QWidget):
         initial_files = list(self._initial_files)
         irrad_files   = list(self._irrad_files)
         pss_files     = list(self._pss_files)
-        mode          = self._mode_combo.currentText()
 
         def _do_load():
             grid, S_A, n_init = load_and_average_files(initial_files)
             print(f"Initial spectrum: {n_init} scan(s) averaged, "
                   f"grid {grid[0]}–{grid[-1]} nm")
-            series = load_irradiation_series_files(irrad_files, grid)
-            print(f"Irradiation series: {len(series)} spectra")
+            if irrad_files:
+                series, labels, sources = load_irradiation_series_files(irrad_files, grid)
+                print(f"Irradiation series: {len(series)} spectra")
+            else:
+                series  = np.empty((0, len(grid)))
+                labels  = []
+                sources = []
+                print("No irradiation files — PSS-only mode")
             S_PSS = None
             if pss_files:
                 S_PSS = load_pss_files(pss_files, grid)
@@ -713,7 +959,7 @@ class SpectraTab(QWidget):
                 reference_wavelength_nm=None,   # will be set per run
                 compound_name="",
             )
-            return grid, S_A, series, S_PSS, fig
+            return grid, S_A, series, labels, sources, S_PSS, fig
 
         self._worker = Worker(_do_load)
         self._worker.log_signal.connect(self.log_signal)
@@ -724,11 +970,12 @@ class SpectraTab(QWidget):
         self._worker.start()
 
     def _on_load_done(self, res):
-        grid, S_A, series, S_PSS, fig = res
+        grid, S_A, series, labels, sources, S_PSS, fig = res
         self._grid   = grid
         self._S_A    = S_A
         self._series = series
         self._S_PSS  = S_PSS
+        self._update_computed_conc()   # refresh computed c now that S_A is known
 
         self._overview_plot.set_figure(fig)
         if self._output_path:
@@ -736,9 +983,13 @@ class SpectraTab(QWidget):
         self._overview_plot.set_default_filename("data_overview.png")
         self._overview_plot.show()
 
+        self._populate_spectra_list(labels, sources)
+        self._update_auto_fb()
+
         n = len(series)
+        irrad_info = f"{n} irradiation spectra" if n > 0 else "no irradiation series (PSS-only)"
         self._load_status_lbl.setText(
-            f"Loaded — grid {grid[0]}–{grid[-1]} nm, {n} irradiation spectra")
+            f"Loaded — grid {grid[0]}–{grid[-1]} nm, {irrad_info}")
         self._stage1.set_status(DONE)
         self._stage2.set_status(READY)
         self._stage3.set_status(WAITING)
@@ -778,6 +1029,81 @@ class SpectraTab(QWidget):
             return (int(parts[0]), int(parts[1]))
         return [int(x) for x in text.split(",")]
 
+    # ── Concentration mode helpers ─────────────────────────────────────────────
+
+    def _on_conc_mode_changed(self):
+        manual = self._conc_manual_rb.isChecked()
+        self._conc_edit.setEnabled(manual)
+        self._ec_row_widget.setVisible(not manual)
+        self._ec_conc_lbl.setVisible(not manual)
+        if not manual:
+            self._update_computed_conc()
+
+    def _select_ec_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select extinction coefficient CSV", "", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path, comment="#")
+            # Try to find wavelength and epsilon columns (flexible naming)
+            wl_col  = next((c for c in df.columns
+                            if "wavelength" in c.lower() or "wl" in c.lower()
+                            or c.strip().lower() in ("nm", "lambda")), None)
+            eps_col = next((c for c in df.columns
+                            if "mean" in c.lower() or "epsilon" in c.lower()
+                            or "eps" in c.lower() or "molar" in c.lower()
+                            or "m-1" in c.lower() or "m^-1" in c.lower()), None)
+            if wl_col is None or eps_col is None:
+                self._ec_file_lbl.setText(
+                    f"Could not find wavelength/epsilon columns in {Path(path).name}")
+                return
+            self._ec_wl_arr  = pd.to_numeric(df[wl_col],  errors="coerce").values
+            self._ec_eps_arr = pd.to_numeric(df[eps_col], errors="coerce").values
+            valid = np.isfinite(self._ec_wl_arr) & np.isfinite(self._ec_eps_arr)
+            self._ec_wl_arr  = self._ec_wl_arr[valid]
+            self._ec_eps_arr = self._ec_eps_arr[valid]
+            self._ec_file_lbl.setText(
+                f"{Path(path).name}  ({wl_col} / {eps_col})")
+            # Set spinbox range to loaded spectrum range
+            self._ec_wl_spin.setRange(
+                float(self._ec_wl_arr.min()), float(self._ec_wl_arr.max()))
+            self._update_computed_conc()
+        except Exception as exc:
+            self._ec_file_lbl.setText(f"Error: {exc}")
+
+    def _update_computed_conc(self):
+        """Compute c = A(λ) / (ε(λ) × l) and show it."""
+        self._ec_computed_conc = None
+        if (self._ec_wl_arr is None or self._ec_eps_arr is None
+                or self._S_A is None or self._grid is None):
+            self._ec_conc_lbl.setText(
+                "Load data (Stage 1) and select an \u03b5 spectrum to compute c.")
+            return
+        lam = self._ec_wl_spin.value()
+        l   = self._path_length_spin.value()
+        # Interpolate ε at λ
+        eps_at_lam = float(np.interp(lam, self._ec_wl_arr, self._ec_eps_arr))
+        # Interpolate A_initial at λ
+        A_at_lam   = float(np.interp(lam, self._grid, self._S_A))
+        if eps_at_lam <= 0:
+            self._ec_conc_lbl.setText(
+                f"\u03b5({lam:.1f} nm) = {eps_at_lam:.2f} — cannot divide by zero")
+            return
+        c = A_at_lam / (eps_at_lam * l)
+        self._ec_computed_conc = c
+        self._ec_conc_lbl.setText(
+            f"  \u2192  c = {c:.4e} mol/L   "
+            f"[\u03b5({lam:.1f} nm) = {eps_at_lam:.2f} M\u207b\u00b9cm\u207b\u00b9, "
+            f"A\u2080({lam:.1f} nm) = {A_at_lam:.4f}]")
+
+    def _get_concentration(self) -> Optional[float]:
+        """Return the concentration to use for unit conversion."""
+        if self._conc_manual_rb.isChecked():
+            text = self._conc_edit.text().strip()
+            return float(text) if text else None
+        return self._ec_computed_conc
+
     # ── Run extraction ────────────────────────────────────────────────────────
 
     def _run_extraction(self):
@@ -797,8 +1123,7 @@ class SpectraTab(QWidget):
             self._run_status_lbl.setText(str(e))
             return
 
-        conc_text = self._conc_edit.text().strip()
-        concentration = float(conc_text) if conc_text else None
+        concentration = self._get_concentration()
 
         try:
             indices = self._parse_indices(
@@ -806,6 +1131,12 @@ class SpectraTab(QWidget):
         except ValueError:
             self._run_status_lbl.setText("Invalid spectrum indices.")
             return
+
+        pss_obs_wl = (
+            self._pss_obs_wl_spin.value()
+            if mode == "positive_pss" and self._pss_auto_fb_cb.isChecked()
+            else None
+        )
 
         params = SpectraParams(
             mode                    = mode,
@@ -822,6 +1153,7 @@ class SpectraTab(QWidget):
             n_bootstrap             = self._n_bootstrap_spin.value(),
             pss_fraction_B          = self._pss_fb_spin.value(),
             pss_fraction_B_error    = self._pss_fb_err_spin.value(),
+            pss_obs_wavelength_nm   = pss_obs_wl,
             spectrum_indices        = indices,
             show_diagnostics        = self._diag_chk.isChecked(),
         )
@@ -833,8 +1165,17 @@ class SpectraTab(QWidget):
 
         grid   = self._grid
         S_A    = self._S_A
-        series = self._series
         S_PSS  = self._S_PSS
+        if self._irrad_disabled_idx:
+            active = [i for i in range(len(self._series))
+                      if i not in self._irrad_disabled_idx]
+            if not active:
+                self._run_status_lbl.setText(
+                    "All spectra are disabled — enable at least one.")
+                return
+            series = self._series[active]
+        else:
+            series = self._series
 
         self._run_btn.setEnabled(False)
         self._stage3.set_status(WAITING)
@@ -895,8 +1236,10 @@ class SpectraTab(QWidget):
         if self._result is None:
             return
         r = self._result
-        default_dir = str(self._output_path / "spectra" / "results") \
-            if self._output_path else ""
+        default_dir = self._output_path / "spectra" / "results" \
+            if self._output_path else None
+        if default_dir:
+            default_dir.mkdir(parents=True, exist_ok=True)
         cname = r.compound or "spectra"
         default_name = f"{cname}_{r.mode}_spectra.csv"
         path, _ = QFileDialog.getSaveFileName(
@@ -929,11 +1272,14 @@ class SpectraTab(QWidget):
 
     # ── Prefs ─────────────────────────────────────────────────────────────────
 
+    def set_raw_path(self, path: Path):
+        self._raw_path = path
+
     def set_output_path(self, path: Path):
         self._output_path = path
         if self._output_path:
-            self._result_plot.set_save_dir(path / "spectra" / "plots")
-            self._overview_plot.set_save_dir(path / "spectra" / "plots")
+            self._result_plot.set_save_dir(path / "spectra" / "results" / "plots")
+            self._overview_plot.set_save_dir(path / "spectra" / "results" / "plots")
 
     def apply_prefs(self, prefs: ProjectPrefs):
         p = prefs.spectra
@@ -951,6 +1297,8 @@ class SpectraTab(QWidget):
         self._n_bootstrap_spin.setValue(p.n_bootstrap)
         self._pss_fb_spin.setValue(p.pss_fraction_B)
         self._pss_fb_err_spin.setValue(p.pss_fraction_B_error)
+        self._pss_auto_fb_cb.setChecked(p.pss_auto_fb)
+        self._pss_obs_wl_spin.setValue(p.pss_obs_wavelength_nm)
 
     def collect_prefs(self, prefs: ProjectPrefs):
         prefs.spectra.compound_name           = self._compound_edit.text().strip()
@@ -965,3 +1313,5 @@ class SpectraTab(QWidget):
         prefs.spectra.n_bootstrap             = self._n_bootstrap_spin.value()
         prefs.spectra.pss_fraction_B          = self._pss_fb_spin.value()
         prefs.spectra.pss_fraction_B_error    = self._pss_fb_err_spin.value()
+        prefs.spectra.pss_auto_fb             = self._pss_auto_fb_cb.isChecked()
+        prefs.spectra.pss_obs_wavelength_nm   = self._pss_obs_wl_spin.value()

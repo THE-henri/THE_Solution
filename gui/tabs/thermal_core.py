@@ -44,12 +44,12 @@ def load_half_life_master(filepath: Path) -> pd.DataFrame:
 
 def group_by_temperature(
     df: pd.DataFrame,
-) -> list[tuple[float, float, Optional[float], int]]:
+) -> list[tuple[float, float, Optional[float], int, Optional[float]]]:
     """
     Group half-life master rows by Temperature_C.
 
-    Returns sorted list of (T_K, k_mean, k_sem_or_None, n).
-    k_sem is None when only one measurement exists at that temperature.
+    Returns sorted list of (T_K, k_mean, k_sem_or_None, n, k_std_or_None).
+    k_sem and k_std are None when only one measurement exists at that temperature.
     """
     entries = []
     for T_C, grp in df.groupby("Temperature_C"):
@@ -57,10 +57,14 @@ def group_by_temperature(
         if len(k_vals) == 0:
             continue
         k_mean = float(k_vals.mean())
-        k_sem  = float(k_vals.std(ddof=1) / np.sqrt(len(k_vals))) \
-            if len(k_vals) > 1 else None
+        if len(k_vals) > 1:
+            k_std = float(k_vals.std(ddof=1))
+            k_sem = k_std / np.sqrt(len(k_vals))
+        else:
+            k_std = None
+            k_sem = None
         T_K = float(T_C) + 273.15
-        entries.append((T_K, k_mean, k_sem, len(k_vals)))
+        entries.append((T_K, k_mean, k_sem, len(k_vals), k_std))
     return sorted(entries)
 
 
@@ -83,6 +87,15 @@ class ArrheniusResult:
     sigma_y:        Optional[np.ndarray]
     T_C_list:       list[float]
     k_mean_list:    list[float]
+    # per-temperature statistics for publication table
+    k_std_list:     list[Optional[float]]  # std dev of k replicates (None if n=1)
+    n_list:         list[int]
+    # dense fit line for publication export
+    x_fit:          np.ndarray   # 1000 / T_K, 200 points
+    y_fit:          np.ndarray   # ln_k values on fit line
+    # extrapolated values at 25 °C
+    k_25C:          float
+    t_half_25C_s:   float
 
 
 @dataclass
@@ -102,6 +115,15 @@ class EyringResult:
     sigma_y:        Optional[np.ndarray]
     T_C_list:       list[float]
     k_mean_list:    list[float]
+    # per-temperature statistics for publication table
+    k_std_list:     list[Optional[float]]  # std dev of k replicates (None if n=1)
+    n_list:         list[int]
+    # dense fit line for publication export
+    x_fit:          np.ndarray   # 1000 / T_K, 200 points
+    y_fit:          np.ndarray   # ln_kT values on fit line
+    # extrapolated values at 25 °C
+    k_25C:          float
+    t_half_25C_s:   float
 
 
 # ── Arrhenius ─────────────────────────────────────────────────────────────────
@@ -128,10 +150,11 @@ def run_arrhenius(
     T_K_arr    = np.array([e[0] for e in entries])
     k_arr      = np.array([e[1] for e in entries])
     k_sem_list = [e[2] for e in entries]
+    n_list     = [e[3] for e in entries]
+    k_std_list = [e[4] for e in entries]
     T_C_list   = [e[0] - 273.15 for e in entries]
 
-    for T_C, k_m, k_s, n in zip(T_C_list, k_arr, k_sem_list,
-                                  [e[3] for e in entries]):
+    for T_C, k_m, k_s, n in zip(T_C_list, k_arr, k_sem_list, n_list):
         sem_str = f"± {k_s:.6f}" if k_s is not None else "(n = 1)"
         print(f"  T = {T_C:.1f} °C  →  k = {k_m:.6f} {sem_str} s⁻¹")
 
@@ -164,11 +187,19 @@ def run_arrhenius(
     r2        = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
     x_data = 1000.0 * inv_T
+    x_fit  = np.linspace(x_data.min() * 0.998, x_data.max() * 1.002, 200)
+    y_fit  = _linear(x_fit / 1000.0, slope, intercept)
+
+    T_25K    = 298.15
+    k_25C    = float(A * np.exp(-Ea_J / (R * T_25K)))
+    t_half_25C_s = float(np.log(2) / k_25C)
+
     print(f"\nArrhenius ({len(entries)} temperatures, "
           f"{'weighted' if use_weights else 'unweighted'}):")
     print(f"  Ea = {Ea_kJ:.2f} ± {Ea_std_kJ:.2f} kJ mol⁻¹")
     print(f"  A  = {A:.4e} ± {A_std:.4e} s⁻¹")
     print(f"  R² = {r2:.6f}")
+    print(f"  k(25 °C) = {k_25C:.4e} s⁻¹   t½(25 °C) = {t_half_25C_s:.2f} s")
 
     return ArrheniusResult(
         compound=compound_name,
@@ -185,6 +216,12 @@ def run_arrhenius(
         sigma_y=sigma_y,
         T_C_list=T_C_list,
         k_mean_list=list(k_arr),
+        k_std_list=k_std_list,
+        n_list=n_list,
+        x_fit=x_fit,
+        y_fit=y_fit,
+        k_25C=k_25C,
+        t_half_25C_s=t_half_25C_s,
     )
 
 
@@ -210,12 +247,17 @@ def plot_arrhenius(result: ArrheniusResult) -> plt.Figure:
     ax.plot(x_fit, _linear(x_fit / 1000.0, slope_r, intercept_r),
             "--", color="red", linewidth=2, label="Arrhenius fit")
 
+    t25s = result.t_half_25C_s
     annotation = (
         r"$\ln(k) = \ln(A) - \frac{E_a}{R}\cdot\frac{1}{T}$" + "\n"
         f"$E_a$ = {result.Ea_kJmol:.2f} ± {result.Ea_std_kJmol:.2f}"
         r" kJ mol$^{-1}$" + "\n"
         f"$A$   = {result.A_s:.4e} ± {result.A_std_s:.4e} s$^{{-1}}$\n"
-        f"$R^2$ = {result.r2:.4f}"
+        f"$R^2$ = {result.r2:.4f}\n"
+        f"$k$(25 °C) = {result.k_25C:.4e} s$^{{-1}}$\n"
+        f"$t_{{1/2}}$(25 °C) = {t25s:.2f} s"
+        f"  /  {t25s/60:.2f} min"
+        f"  /  {t25s/3600:.2f} h"
     )
     ax.text(0.97, 0.97, annotation,
             transform=ax.transAxes, fontsize=10,
@@ -255,10 +297,11 @@ def run_eyring(
     T_K_arr    = np.array([e[0] for e in entries])
     k_arr      = np.array([e[1] for e in entries])
     k_sem_list = [e[2] for e in entries]
+    n_list     = [e[3] for e in entries]
+    k_std_list = [e[4] for e in entries]
     T_C_list   = [e[0] - 273.15 for e in entries]
 
-    for T_C, k_m, k_s, n in zip(T_C_list, k_arr, k_sem_list,
-                                  [e[3] for e in entries]):
+    for T_C, k_m, k_s, n in zip(T_C_list, k_arr, k_sem_list, n_list):
         sem_str = f"± {k_s:.6f}" if k_s is not None else "(n = 1)"
         print(f"  T = {T_C:.1f} °C  →  k = {k_m:.6f} {sem_str} s⁻¹")
 
@@ -289,11 +332,20 @@ def run_eyring(
     r2         = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
     x_data = 1000.0 * inv_T
+    x_fit  = np.linspace(x_data.min() * 0.998, x_data.max() * 1.002, 200)
+    y_fit  = _linear(x_fit / 1000.0, slope, intercept)
+
+    T_25K    = 298.15
+    k_25C    = float((kB * T_25K / h) * np.exp(
+                    -(dH_kJ * 1000.0) / (R * T_25K) + dS_J / R))
+    t_half_25C_s = float(np.log(2) / k_25C)
+
     print(f"\nEyring ({len(entries)} temperatures, "
           f"{'weighted' if use_weights else 'unweighted'}):")
     print(f"  ΔH‡ = {dH_kJ:.2f} ± {dH_std_kJ:.2f} kJ mol⁻¹")
     print(f"  ΔS‡ = {dS_J:.2f} ± {dS_std_J:.2f} J mol⁻¹ K⁻¹")
     print(f"  R²  = {r2:.6f}")
+    print(f"  k(25 °C) = {k_25C:.4e} s⁻¹   t½(25 °C) = {t_half_25C_s:.2f} s")
 
     return EyringResult(
         compound=compound_name,
@@ -310,6 +362,12 @@ def run_eyring(
         sigma_y=sigma_y,
         T_C_list=T_C_list,
         k_mean_list=list(k_arr),
+        k_std_list=k_std_list,
+        n_list=n_list,
+        x_fit=x_fit,
+        y_fit=y_fit,
+        k_25C=k_25C,
+        t_half_25C_s=t_half_25C_s,
     )
 
 
@@ -333,6 +391,7 @@ def plot_eyring(result: EyringResult) -> plt.Figure:
     ax.plot(x_fit, _linear(x_fit / 1000.0, slope_r, intercept_r),
             "--", color="red", linewidth=2, label="Eyring fit")
 
+    t25s = result.t_half_25C_s
     annotation = (
         r"$\ln\!\left(\frac{k}{T}\right)="
         r"-\frac{\Delta H^\ddagger}{R}\cdot\frac{1}{T}"
@@ -341,7 +400,11 @@ def plot_eyring(result: EyringResult) -> plt.Figure:
         f"{result.dH_std_kJmol:.2f} kJ mol$^{{-1}}$\n"
         f"$\\Delta S^\\ddagger$ = {result.dS_JmolK:.2f} ± "
         f"{result.dS_std_JmolK:.2f} J mol$^{{-1}}$ K$^{{-1}}$\n"
-        f"$R^2$ = {result.r2:.4f}"
+        f"$R^2$ = {result.r2:.4f}\n"
+        f"$k$(25 °C) = {result.k_25C:.4e} s$^{{-1}}$\n"
+        f"$t_{{1/2}}$(25 °C) = {t25s:.2f} s"
+        f"  /  {t25s/60:.2f} min"
+        f"  /  {t25s/3600:.2f} h"
     )
     ax.text(0.97, 0.97, annotation,
             transform=ax.transAxes, fontsize=10,

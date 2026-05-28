@@ -20,8 +20,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QPushButton, QComboBox, QCheckBox,
-    QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem,
+    QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QAbstractItemView, QFrame,
     QGroupBox,
 )
@@ -29,14 +29,115 @@ from PyQt6.QtWidgets import (
 import pandas as pd
 
 from gui.tabs.qy_core import (
-    QYParams, QYFileResult,
+    QYParams, QYFileResult, PSSPlateauResult,
     load_photon_flux, load_epsilon_at_wavelength, load_epsilon_at_wavelengths,
-    load_k_th, run_qy_file, plot_qy_result, plot_qy_led_diagnostic,
+    load_k_th, run_qy_file, run_qy_linearized, plot_qy_result,
+    plot_qy_led_diagnostic, plot_pss_kinetic, plot_pss_scanning,
+    detect_pss_plateaus,
+    build_qy_master_row, build_qy_detail_df, plot_qy_publication,
 )
 from gui.widgets.stage_card import StageCard, WAITING, READY, DONE, STALE, ERROR
 from gui.widgets.plot_widget import PlotWidget
 from gui.widgets.info_button import InfoButton
+from gui.widgets.master_csv_table import MasterCsvTable
 from gui.worker import Worker
+
+# ── QY master CSV column specification ───────────────────────────────────────
+
+_QY_COLUMNS = [
+    "File", "Compound", "Case", "Irr_type", "Irr_wl_nm",
+    "Mon_wl_nm", "Temperature_C", "Solvent",
+    "QY_AB", "sigma_total_AB", "QY_BA", "R2", "Method",
+]
+_QY_HEADER_LABELS = [
+    "File", "Compound", "Case", "Irr. type", "λ_irr (nm)",
+    "λ_mon (nm)", "T (°C)", "Solvent",
+    "Φ_AB", "σ_total", "Φ_BA", "R²", "Method",
+]
+_QY_FLOAT_COLS = {
+    "Irr_wl_nm", "Mon_wl_nm", "Temperature_C",
+    "QY_AB", "sigma_total_AB", "QY_BA", "R2",
+}
+_QY_FLOAT_FMT = {
+    "Irr_wl_nm": ".0f", "Mon_wl_nm": ".0f",
+    "Temperature_C": ".1f",
+    "QY_AB": ".5f", "sigma_total_AB": ".5f", "QY_BA": ".5f", "R2": ".4f",
+}
+
+
+# ── QY master CSV — summary hook ─────────────────────────────────────────────
+
+def _qy_summary_hook(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Append mean ± σ summary rows to the QY master CSV DataFrame.
+
+    Groups by compound / case / irradiation / temperature / solvent /
+    monitoring wavelength.  For each group adds one summary row:
+
+        σ_prop  = √(Σ σ_total_i²) / n   — propagated uncertainty of the mean
+        σ_stat  = std(Φ_i, ddof=1) / √n  — standard error of the mean (n > 1)
+        σ_total = √(σ_prop² + σ_stat²)   — combined uncertainty
+
+    A single separator row ("---") is inserted before the summary block.
+    """
+    import numpy as np
+    import pandas as _pd
+
+    group_cols = [c for c in
+                  ["Compound", "Case", "Irr_type", "Irr_wl_nm",
+                   "Temperature_C", "Solvent", "Mon_wl_nm"]
+                  if c in df.columns]
+
+    df = df.copy()
+    for col in ["QY_AB", "sigma_total_AB", "QY_BA", "R2"]:
+        if col in df.columns:
+            df[col] = _pd.to_numeric(df[col], errors="coerce")
+
+    summary_rows: list[dict] = []
+
+    for _key, grp in df.groupby(group_cols, dropna=False, sort=False):
+        phi_ab = grp["QY_AB"].dropna().values if "QY_AB" in grp else np.array([])
+        sig_ab = grp["sigma_total_AB"].dropna().values if "sigma_total_AB" in grp else np.array([])
+        phi_ba = grp["QY_BA"].dropna().values if "QY_BA" in grp else np.array([])
+
+        if len(phi_ab) == 0:
+            continue
+
+        n = len(phi_ab)
+        phi_ab_mean = float(phi_ab.mean())
+
+        # Propagated uncertainty (independent measurements, divided by n)
+        if len(sig_ab) == n:
+            sigma_prop = float(np.sqrt(np.sum(sig_ab ** 2))) / n
+        else:
+            sigma_prop = 0.0
+
+        # Statistical uncertainty (scatter of repeated measurements)
+        sigma_stat = float(phi_ab.std(ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+
+        sigma_combined = float(np.sqrt(sigma_prop ** 2 + sigma_stat ** 2))
+
+        row: dict = {c: "" for c in _QY_COLUMNS}
+        for c in group_cols:
+            row[c] = grp[c].iloc[0]
+        row["File"]           = f"MEAN (n={n})"
+        row["QY_AB"]          = phi_ab_mean
+        row["sigma_total_AB"] = sigma_combined
+        if len(phi_ba) > 0:
+            row["QY_BA"] = float(phi_ba.mean())
+        if "R2" in grp.columns:
+            r2_vals = _pd.to_numeric(grp["R2"], errors="coerce").dropna().values
+            row["R2"] = float(r2_vals.mean()) if len(r2_vals) > 0 else ""
+        row["Method"] = "mean ± σ"
+
+        summary_rows.append(row)
+
+    if not summary_rows:
+        return df
+
+    sep = {c: ("---" if c == "File" else "") for c in _QY_COLUMNS}
+    summary_df = _pd.DataFrame([sep] + summary_rows, columns=_QY_COLUMNS)
+    return _pd.concat([df, summary_df], ignore_index=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -144,6 +245,7 @@ class QuantumYieldTab(QWidget):
         self._results:     list[QYFileResult] = []
         self._current_idx: int = 0
         self._worker:      Optional[Worker] = None
+        self._qy_master:   Optional[MasterCsvTable] = None
         self._build_ui()
 
     # ── Build ─────────────────────────────────────────────────────────────────
@@ -168,8 +270,11 @@ class QuantumYieldTab(QWidget):
         self._build_stage2(layout)
         self._build_stage3(layout)
         self._build_stage4(layout)
+        self._build_stage5(layout)
         layout.addStretch()
         self._connect_stale_signals()
+        # Apply initial grayout state based on the default case
+        self._on_case_changed(self._case_combo.currentText())
 
     # ── Stage 1 — Input Files & Photon Flux ──────────────────────────────────
 
@@ -214,6 +319,25 @@ class QuantumYieldTab(QWidget):
         self._file_list.setFixedHeight(90)
         self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._stage1.add_widget(self._file_list)
+
+        # Preview button
+        prev_row = QHBoxLayout()
+        self._preview_btn = QPushButton("📈 Preview data")
+        self._preview_btn.setObjectName("plot_tool_btn")
+        self._preview_btn.setFixedHeight(26)
+        self._preview_btn.clicked.connect(self._preview_data)
+        prev_row.addStretch()
+        prev_row.addWidget(self._preview_btn)
+        self._stage1.add_layout(prev_row)
+
+        self._preview_plot = PlotWidget(
+            info_title="Raw data preview",
+            info_text="Kinetic mode: each channel plotted as Abs vs time.\n"
+                      "Scanning mode: all spectra overlaid, colour-coded by time.",
+            min_height=260,
+        )
+        self._preview_plot.setVisible(False)
+        self._stage1.add_widget(self._preview_plot)
 
         # ── Data type ────────────────────────────────────────────────────────
         self._data_type_combo = QComboBox()
@@ -426,11 +550,23 @@ class QuantumYieldTab(QWidget):
 
         # Case & identifiers
         self._case_combo = QComboBox()
-        self._case_combo.addItems(["A_only", "AB_both", "A_thermal_PSS"])
+        self._case_combo.addItems([
+            "A_only", "A_only_thermal", "AB_both", "AB_thermal", "A_thermal_PSS",
+        ])
         _row_case = _field_row("Case:", self._case_combo, 140, pref=True)
         _row_case.insertWidget(1, InfoButton(
             "Photochemical case",
-            "Selects the kinetic model:\n\n'A_only' — irreversible A\u2192B reaction (no back-reaction).\n  Use for photobleaching or one-directional photoswitches.\n\n'AB_both' — bidirectional A\u21ccB. Both forward and reverse\n  quantum yields are fitted simultaneously.\n\n'A_thermal_PSS' — A\u2192B photoreaction with thermal B\u2192A\n  back-reaction. Use for T-type photoswitches."
+            "Selects the kinetic model used for fitting:\n\n"
+            "'A_only' — only A absorbs at λ_irr; irreversible A→B.\n"
+            "  ε_B_irr and k_th forced to zero.\n\n"
+            "'A_only_thermal' — only A absorbs; B reverts thermally.\n"
+            "  ε_B_irr forced to zero. k_th must be supplied.\n\n"
+            "'AB_both' — both A and B absorb; bidirectional photoreaction.\n"
+            "  Fits Φ_AB and Φ_BA simultaneously. k_th forced to zero.\n\n"
+            "'AB_thermal' — both A and B absorb + thermal B→A.\n"
+            "  Fits Φ_AB and Φ_BA. k_th must be supplied.\n\n"
+            "'A_thermal_PSS' — PSS algebraic: only A absorbs,\n"
+            "  thermal back-reaction at PSS. No ODE fit."
         ))
         self._stage2.add_layout(_row_case)
 
@@ -438,11 +574,11 @@ class QuantumYieldTab(QWidget):
         self._temp_spin.setRange(-100, 200)
         self._temp_spin.setDecimals(1)
         self._temp_spin.setValue(25.0)
-        self._temp_spin.setSuffix(" \u00b0C")
+        self._temp_spin.setSuffix(" °C")
         _row_temp = _field_row("Temperature:", self._temp_spin, 100, pref=True)
         _row_temp.insertWidget(1, InfoButton(
-            "Temperature (\u00b0C)",
-            "Measurement temperature in \u00b0C.\nStored in the results CSV for traceability.\nRequired when using the Eyring/Arrhenius k_th source\nto extrapolate k_th to the measurement temperature."
+            "Temperature (°C)",
+            "Measurement temperature in °C.\nStored in the results CSV for traceability.\nRequired when using the Eyring/Arrhenius k_th source\nto extrapolate k_th to the measurement temperature."
         ))
         self._stage2.add_layout(_row_temp)
 
@@ -547,8 +683,10 @@ class QuantumYieldTab(QWidget):
         self._plat_start_spin.setSpecialValueText("(auto)")
         _row_plat_start = _field_row("Start (s):", self._plat_start_spin, 100)
         _row_plat_start.insertWidget(1, InfoButton(
-            "Plateau start (s)",
-            "Start of the baseline plateau region in seconds.\nSet to 0 for automatic detection from the end of the trace."
+            "Baseline plateau start (s)",
+            "Start of the pre-irradiation window used to average the\n"
+            "baseline absorbance.\n"
+            "Set to 0 to begin from the first data point."
         ))
         bpg.addLayout(_row_plat_start)
         self._plat_end_spin = QDoubleSpinBox()
@@ -558,8 +696,10 @@ class QuantumYieldTab(QWidget):
         self._plat_end_spin.setSpecialValueText("(auto)")
         _row_plat_end = _field_row("End (s):", self._plat_end_spin, 100)
         _row_plat_end.insertWidget(1, InfoButton(
-            "Plateau end (s)",
-            "End of the baseline plateau region in seconds.\nSet to 0 for automatic detection from the end of the trace."
+            "Baseline plateau end (s)",
+            "End of the pre-irradiation window used to average the\n"
+            "baseline absorbance.\n"
+            "Set to 0 to end just before the auto-detected irradiation onset."
         ))
         bpg.addLayout(_row_plat_end)
         self._stage2.add_widget(self._baseline_plat_grp)
@@ -577,9 +717,13 @@ class QuantumYieldTab(QWidget):
         self._stage2.add_widget(self._baseline_file_grp)
         self._baseline_file_grp.setVisible(False)
 
-        # Fit window
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color:#555;"); self._stage2.add_widget(sep2)
+        # Fit window (container hidden for PSS case)
+        self._fit_window_container = QWidget()
+        _fwc = QVBoxLayout(self._fit_window_container)
+        _fwc.setContentsMargins(0, 0, 0, 0)
+        _fwc.setSpacing(4)
+        _fwc_sep = QFrame(); _fwc_sep.setFrameShape(QFrame.Shape.HLine)
+        _fwc_sep.setStyleSheet("color:#555;"); _fwc.addWidget(_fwc_sep)
 
         self._auto_detect_chk = QCheckBox("Auto-detect irradiation start")
         self._auto_detect_chk.setChecked(True)
@@ -591,7 +735,7 @@ class QuantumYieldTab(QWidget):
             "Automatically locates the time point where irradiation begins\nby detecting when the absorbance rises above the baseline noise.\n\nDisable and set the fit window manually if auto-detection\nfails (e.g. slow-starting reactions or very noisy baselines)."
         ))
         _row_auto_detect.addStretch()
-        self._stage2.add_layout(_row_auto_detect)
+        _fwc.addLayout(_row_auto_detect)
         self._auto_detect_chk.toggled.connect(self._on_autodetect_toggled)
 
         self._auto_detect_grp = QGroupBox("Auto-detect parameters")
@@ -624,7 +768,7 @@ class QuantumYieldTab(QWidget):
             "Number of consecutive points that must all exceed the\ndetection threshold before the irradiation onset is confirmed.\n\nHigher values reduce false positives from single-point spikes.\nTypical value: 3\u20135."
         ))
         adg.addLayout(_row_min_consec)
-        self._stage2.add_widget(self._auto_detect_grp)
+        _fwc.addWidget(self._auto_detect_grp)
 
         self._manual_window_grp = QGroupBox("Manual fit window")
         mwg = QVBoxLayout(self._manual_window_grp)
@@ -639,19 +783,26 @@ class QuantumYieldTab(QWidget):
             "Manual start of the fitting window in seconds.\nSet to 0 to use the auto-detected irradiation onset.\n\nUse a manual value to skip an initial transient or when\nauto-detection places the onset incorrectly."
         ))
         mwg.addLayout(_row_fit_start)
+        _fwc.addWidget(self._manual_window_grp)
+        self._manual_window_grp.setVisible(False)
+
+        # Fit end — always visible regardless of auto-detect mode
         self._fit_end_spin = QDoubleSpinBox()
         self._fit_end_spin.setRange(0, 1e6)
         self._fit_end_spin.setDecimals(1)
         self._fit_end_spin.setValue(0.0)
-        self._fit_end_spin.setSpecialValueText("(auto)")
+        self._fit_end_spin.setSpecialValueText("(full trace)")
         _row_fit_end = _field_row("Fit end (s):", self._fit_end_spin, 100)
         _row_fit_end.insertWidget(1, InfoButton(
             "Fit window end (s)",
-            "Manual end of the fitting window in seconds.\nSet to 0 to use the full trace after the onset.\n\nTruncate the window if the reaction reaches equilibrium\nbefore the end of the measurement."
+            "End of the fitting window in seconds.\n"
+            "Set to 0 (shown as '(full trace)') to include all data after the onset.\n\n"
+            "Always visible — applies whether onset is auto-detected or manual.\n\n"
+            "Use this to truncate the window if the reaction reaches equilibrium\n"
+            "or the data quality degrades before the end of the trace."
         ))
-        mwg.addLayout(_row_fit_end)
-        self._stage2.add_widget(self._manual_window_grp)
-        self._manual_window_grp.setVisible(False)
+        _fwc.addLayout(_row_fit_end)
+        self._stage2.add_widget(self._fit_window_container)
 
         # k_th
         sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
@@ -708,8 +859,9 @@ class QuantumYieldTab(QWidget):
         self._kth_temp_spin = QDoubleSpinBox()
         self._kth_temp_spin.setRange(-100, 200)
         self._kth_temp_spin.setDecimals(1)
-        self._kth_temp_spin.setValue(25.0)
+        self._kth_temp_spin.setValue(self._temp_spin.value())
         self._kth_temp_spin.setSuffix(" \u00b0C")
+        self._temp_spin.valueChanged.connect(self._kth_temp_spin.setValue)
         _row_kth_temp = _field_row("Temperature:", self._kth_temp_spin, 100, pref=True)
         _row_kth_temp.insertWidget(1, InfoButton(
             "Temperature for k_th lookup (\u00b0C)",
@@ -724,34 +876,164 @@ class QuantumYieldTab(QWidget):
         sep4.setStyleSheet("color:#555;"); self._stage2.add_widget(sep4)
         self._pss_grp = QGroupBox("PSS parameters (A_thermal_PSS case)")
         psg = QVBoxLayout(self._pss_grp)
-        self._pss_src_combo = QComboBox()
-        self._pss_src_combo.addItems(["manual_fraction", "manual_absorbance"])
-        _row_pss_src = _field_row("PSS source:", self._pss_src_combo, 160)
-        _row_pss_src.insertWidget(1, InfoButton(
-            "PSS composition source",
-            "How the photostationary state (PSS) composition is specified:\n\n'manual_fraction' — enter the fraction of species B at PSS directly.\n'manual_absorbance' — enter the absorbance of species A at PSS\n  (the fraction is derived from this and the initial absorbance)."
+        psg.setSpacing(6)
+
+        # Kinetic sub-panel
+        self._pss_kin_panel = QWidget()
+        pkg = QVBoxLayout(self._pss_kin_panel)
+        pkg.setContentsMargins(0, 0, 0, 0)
+        pkg.setSpacing(4)
+        pkg.addWidget(_label("Plateau detection (kinetic):", color="#aaa"))
+
+        pss_params_row = QHBoxLayout()
+        self._pss_n_plat_spin = QSpinBox()
+        self._pss_n_plat_spin.setRange(1, 10)
+        self._pss_n_plat_spin.setValue(1)
+        _np_row = _field_row("# Plateaus:", self._pss_n_plat_spin, 60)
+        _np_row.insertWidget(1, InfoButton(
+            "Number of PSS plateaus",
+            "How many flat PSS plateau regions to detect in the kinetic trace. Use 1 for a single irradiation run; use more to average multiple PSS measurements."
         ))
-        psg.addLayout(_row_pss_src)
-        self._pss_frac_spin = QDoubleSpinBox()
-        self._pss_frac_spin.setRange(0, 1)
-        self._pss_frac_spin.setDecimals(4)
-        self._pss_frac_spin.setValue(0.85)
-        _row_pss_frac = _field_row("PSS fraction B:", self._pss_frac_spin, 100)
-        _row_pss_frac.insertWidget(1, InfoButton(
-            "PSS fraction of species B",
-            "Mole fraction of species B at the photostationary state.\nRange: 0 (pure A) to 1 (pure B).\n\nMeasure by NMR, HPLC, or from spectral deconvolution.\nTypical values for efficient T-type switches: 0.5\u20130.95."
+        pss_params_row.addLayout(_np_row)
+        self._pss_min_dur_spin = QDoubleSpinBox()
+        self._pss_min_dur_spin.setRange(1.0, 1e5)
+        self._pss_min_dur_spin.setDecimals(1)
+        self._pss_min_dur_spin.setValue(10.0)
+        self._pss_min_dur_spin.setSuffix(" s")
+        _md_row = _field_row("Min duration:", self._pss_min_dur_spin, 80)
+        _md_row.insertWidget(1, InfoButton(
+            "Minimum plateau duration (s)",
+            "Minimum length of a flat region to be accepted as a PSS plateau. Increase for noisy traces."
         ))
-        psg.addLayout(_row_pss_frac)
-        self._pss_abs_spin = QDoubleSpinBox()
-        self._pss_abs_spin.setRange(0, 10)
-        self._pss_abs_spin.setDecimals(4)
-        self._pss_abs_spin.setValue(0.0)
-        _row_pss_abs = _field_row("A_abs at PSS:", self._pss_abs_spin, 100)
-        _row_pss_abs.insertWidget(1, InfoButton(
-            "Absorbance of A at PSS",
-            "Absorbance contribution of species A at the monitoring\nwavelength when the PSS has been reached.\n\nRead from the kinetic trace plateau or from spectral\ndeconvolution after PSS irradiation."
+        pss_params_row.addLayout(_md_row)
+        pkg.addLayout(pss_params_row)
+
+        self._pss_plat_table = QTableWidget(0, 3)
+        self._pss_plat_table.setHorizontalHeaderLabels(["#", "t_start (s)", "t_end (s)"])
+        self._pss_plat_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self._pss_plat_table.setFixedHeight(110)
+        self._pss_plat_table.verticalHeader().setVisible(False)
+        pkg.addWidget(self._pss_plat_table)
+
+        pss_btn_row = QHBoxLayout()
+        self._pss_auto_btn = QPushButton("Auto-detect")
+        self._pss_auto_btn.setObjectName("plot_tool_btn")
+        self._pss_auto_btn.setFixedHeight(24)
+        self._pss_auto_btn.clicked.connect(self._auto_detect_pss)
+        pss_btn_row.addWidget(self._pss_auto_btn)
+        self._pss_add_row_btn = QPushButton("+ Row")
+        self._pss_add_row_btn.setObjectName("plot_tool_btn")
+        self._pss_add_row_btn.setFixedHeight(24)
+        self._pss_add_row_btn.clicked.connect(self._pss_add_plateau_row)
+        pss_btn_row.addWidget(self._pss_add_row_btn)
+        self._pss_del_row_btn = QPushButton("− Row")
+        self._pss_del_row_btn.setObjectName("plot_tool_btn")
+        self._pss_del_row_btn.setFixedHeight(24)
+        self._pss_del_row_btn.clicked.connect(self._pss_remove_plateau_row)
+        pss_btn_row.addWidget(self._pss_del_row_btn)
+        pss_btn_row.addStretch()
+        pkg.addLayout(pss_btn_row)
+        _pss_prev_kin_row = QHBoxLayout()
+        self._pss_prev_kin_btn = QPushButton("Preview trace")
+        self._pss_prev_kin_btn.setObjectName("plot_tool_btn")
+        self._pss_prev_kin_btn.setFixedHeight(24)
+        self._pss_prev_kin_btn.clicked.connect(self._preview_pss_kinetic)
+        _pss_prev_kin_row.addStretch()
+        _pss_prev_kin_row.addWidget(self._pss_prev_kin_btn)
+        pkg.addLayout(_pss_prev_kin_row)
+        self._pss_kin_preview_plot = PlotWidget(min_height=220)
+        self._pss_kin_preview_plot.setVisible(False)
+        pkg.addWidget(self._pss_kin_preview_plot)
+        psg.addWidget(self._pss_kin_panel)
+
+        # Scanning sub-panel
+        self._pss_scan_panel = QWidget()
+        scp = QVBoxLayout(self._pss_scan_panel)
+        scp.setContentsMargins(0, 0, 0, 0)
+        scp.setSpacing(4)
+        scp.addWidget(_label("PSS spectra selection (scanning):", color="#aaa"))
+
+        self._pss_scan_list = QListWidget()
+        self._pss_scan_list.setFixedHeight(110)
+        scp.addWidget(self._pss_scan_list)
+
+        scan_btn_row = QHBoxLayout()
+        self._pss_load_scan_btn = QPushButton("Load spectrum list")
+        self._pss_load_scan_btn.setObjectName("plot_tool_btn")
+        self._pss_load_scan_btn.setFixedHeight(24)
+        self._pss_load_scan_btn.clicked.connect(self._load_pss_scan_list)
+        scan_btn_row.addWidget(self._pss_load_scan_btn)
+        scan_btn_row.addWidget(_label("  Select last", color="#888"))
+        self._pss_last_n_spin = QSpinBox()
+        self._pss_last_n_spin.setRange(1, 200)
+        self._pss_last_n_spin.setValue(3)
+        self._pss_last_n_spin.setFixedWidth(55)
+        scan_btn_row.addWidget(self._pss_last_n_spin)
+        self._pss_last_n_btn = QPushButton("N")
+        self._pss_last_n_btn.setObjectName("plot_tool_btn")
+        self._pss_last_n_btn.setFixedWidth(28)
+        self._pss_last_n_btn.setFixedHeight(24)
+        self._pss_last_n_btn.clicked.connect(self._pss_select_last_n)
+        scan_btn_row.addWidget(self._pss_last_n_btn)
+        scan_btn_row.addStretch()
+        scp.addLayout(scan_btn_row)
+
+        self._pss_wl_grp = QGroupBox("Wavelength extraction")
+        wlg = QVBoxLayout(self._pss_wl_grp)
+        self._pss_wl_mode_combo = QComboBox()
+        self._pss_wl_mode_combo.addItems([
+            "monitoring λ", "specific λ(s)", "λ range"])
+        _wl_mode_row = _field_row("Mode:", self._pss_wl_mode_combo, 120)
+        _wl_mode_row.insertWidget(1, InfoButton(
+            "PSS wavelength extraction mode",
+            "'monitoring \u03bb' -- use monitoring wavelengths from Stage 2. 'specific \u03bb(s)' -- extract at named wavelengths. '\u03bb range' -- average over a wavelength window."
         ))
-        psg.addLayout(_row_pss_abs)
+        wlg.addLayout(_wl_mode_row)
+        self._pss_wl_mode_combo.currentTextChanged.connect(self._on_pss_wl_mode_changed)
+
+        self._pss_spec_wl_grp = QWidget()
+        swg = QVBoxLayout(self._pss_spec_wl_grp)
+        swg.setContentsMargins(0, 0, 0, 0)
+        self._pss_spec_wl_edit = QLineEdit()
+        self._pss_spec_wl_edit.setPlaceholderText("e.g. 450, 520")
+        swg.addLayout(_field_row("Wavelength(s) (nm):", self._pss_spec_wl_edit, 160))
+        wlg.addWidget(self._pss_spec_wl_grp)
+        self._pss_spec_wl_grp.setVisible(False)
+
+        self._pss_range_wl_grp = QWidget()
+        rwg = QVBoxLayout(self._pss_range_wl_grp)
+        rwg.setContentsMargins(0, 0, 0, 0)
+        self._pss_wl_lo_spin = QDoubleSpinBox()
+        self._pss_wl_lo_spin.setRange(200, 1100)
+        self._pss_wl_lo_spin.setDecimals(1)
+        self._pss_wl_lo_spin.setValue(400.0)
+        self._pss_wl_lo_spin.setSuffix(" nm")
+        rwg.addLayout(_field_row("λ low:", self._pss_wl_lo_spin, 100))
+        self._pss_wl_hi_spin = QDoubleSpinBox()
+        self._pss_wl_hi_spin.setRange(200, 1100)
+        self._pss_wl_hi_spin.setDecimals(1)
+        self._pss_wl_hi_spin.setValue(600.0)
+        self._pss_wl_hi_spin.setSuffix(" nm")
+        rwg.addLayout(_field_row("λ high:", self._pss_wl_hi_spin, 100))
+        wlg.addWidget(self._pss_range_wl_grp)
+        self._pss_range_wl_grp.setVisible(False)
+
+        scp.addWidget(self._pss_wl_grp)
+        _pss_prev_scan_row = QHBoxLayout()
+        self._pss_prev_scan_btn = QPushButton("Preview spectra")
+        self._pss_prev_scan_btn.setObjectName("plot_tool_btn")
+        self._pss_prev_scan_btn.setFixedHeight(24)
+        self._pss_prev_scan_btn.clicked.connect(self._preview_pss_scanning)
+        _pss_prev_scan_row.addStretch()
+        _pss_prev_scan_row.addWidget(self._pss_prev_scan_btn)
+        scp.addLayout(_pss_prev_scan_row)
+        self._pss_scan_preview_plot = PlotWidget(min_height=220)
+        self._pss_scan_preview_plot.setVisible(False)
+        scp.addWidget(self._pss_scan_preview_plot)
+        psg.addWidget(self._pss_scan_panel)
+        self._pss_scan_panel.setVisible(False)
+
         self._stage2.add_widget(self._pss_grp)
         self._pss_grp.setVisible(False)
         self._case_combo.currentTextChanged.connect(self._on_case_changed)
@@ -760,11 +1042,18 @@ class QuantumYieldTab(QWidget):
         sep5 = QFrame(); sep5.setFrameShape(QFrame.Shape.HLine)
         sep5.setStyleSheet("color:#555;"); self._stage2.add_widget(sep5)
         self._init_src_combo = QComboBox()
-        self._init_src_combo.addItems(["absorbance", "manual"])
+        self._init_src_combo.addItems(["absorbance", "plateau", "manual"])
         _row_init_src = _field_row("Initial conc. source:", self._init_src_combo, 120)
         _row_init_src.insertWidget(1, InfoButton(
             "Initial concentration source",
-            "How the initial concentrations [A]\u2080 and [B]\u2080 are determined:\n\n'absorbance' — derived from the initial absorbance and\n  the extinction coefficients (recommended).\n\n'manual' — enter concentrations directly in mol/L.\n  Use when extinction coefficients are not available."
+            "How the initial concentrations [A]₀ and [B]₀ are determined:\n\n"
+            "'absorbance' — uses the first data point of the fit window.\n"
+            "  Recommended when the fit starts exactly at t₀.\n\n"
+            "'plateau' — averages absorbance over a user-defined time range\n"
+            "  before irradiation. More robust against noise at the onset.\n"
+            "  If no end time is given, averages up to the fit start.\n\n"
+            "'manual' — enter concentrations directly in mol/L.\n"
+            "  Use when extinction coefficients are not available."
         ))
         self._stage2.add_layout(_row_init_src)
         self._init_src_combo.currentTextChanged.connect(self._on_init_src_changed)
@@ -795,6 +1084,36 @@ class QuantumYieldTab(QWidget):
         img.addLayout(_row_conc_B0)
         self._stage2.add_widget(self._init_manual_grp)
         self._init_manual_grp.setVisible(False)
+        self._init_plateau_grp = QGroupBox("Plateau for initial absorbance")
+        ipg = QVBoxLayout(self._init_plateau_grp)
+        self._init_plat_start_spin = QDoubleSpinBox()
+        self._init_plat_start_spin.setRange(0, 1e6)
+        self._init_plat_start_spin.setDecimals(1)
+        self._init_plat_start_spin.setValue(0.0)
+        self._init_plat_start_spin.setSuffix(" s")
+        self._init_plat_start_spin.setSpecialValueText("(start of trace)")
+        _row_plat_start = _field_row("Plateau start (s):", self._init_plat_start_spin, 120)
+        _row_plat_start.insertWidget(1, InfoButton(
+            "Plateau window start (s)",
+            "Start of the time range used to average A₀ (initial absorbance).\n"
+            "Set to 0 ('start of trace') to begin from the first data point."
+        ))
+        ipg.addLayout(_row_plat_start)
+        self._init_plat_end_spin = QDoubleSpinBox()
+        self._init_plat_end_spin.setRange(0, 1e6)
+        self._init_plat_end_spin.setDecimals(1)
+        self._init_plat_end_spin.setValue(0.0)
+        self._init_plat_end_spin.setSuffix(" s")
+        self._init_plat_end_spin.setSpecialValueText("(fit start)")
+        _row_plat_end = _field_row("Plateau end (s):", self._init_plat_end_spin, 120)
+        _row_plat_end.insertWidget(1, InfoButton(
+            "Plateau window end (s)",
+            "End of the time range used to average A₀ (initial absorbance).\n"
+            "Set to 0 ('fit start') to average up to the beginning of the fit window."
+        ))
+        ipg.addLayout(_row_plat_end)
+        self._stage2.add_widget(self._init_plateau_grp)
+        self._init_plateau_grp.setVisible(False)
 
         parent_layout.addWidget(self._stage2)
 
@@ -872,7 +1191,8 @@ class QuantumYieldTab(QWidget):
         self._stage3.add_widget(eps_a_grp)
 
         # ε_B
-        eps_b_grp = QGroupBox("ε_B (isomer B / product)")
+        self._eps_b_grp = QGroupBox("ε_B (isomer B / product)")
+        eps_b_grp = self._eps_b_grp
         ebg = QVBoxLayout(eps_b_grp)
         self._eps_b_src_combo = QComboBox()
         self._eps_b_src_combo.addItems(["manual", "csv"])
@@ -987,6 +1307,27 @@ class QuantumYieldTab(QWidget):
         self._qy_ref_edit.setPlaceholderText("(optional) reference Φ_AB for fixed-BA fit")
         self._stage4.add_layout(_field_row("Reference Φ_AB:", self._qy_ref_edit, 160))
 
+        # Method selector — only visible for A_only case
+        from PyQt6.QtWidgets import QWidget as _QWidget
+        self._method_combo = QComboBox()
+        self._method_combo.addItems(["ODE fit", "Exact linearized (log₁₀)"])
+        self._method_row_widget = _QWidget()
+        _mrl = _field_row("Fit method:", self._method_combo, 160)
+        _mrl.insertWidget(1, InfoButton(
+            "Fitting method (A_only only)",
+            "ODE fit — numerically integrates the photokinetic ODE and\n"
+            "  minimises residuals via Levenberg–Marquardt (lmfit).\n\n"
+            "Exact linearized — uses the analytically integrated form:\n"
+            "  log₁₀(10^A_irr(t) − 1) − log₁₀(10^A_irr(0) − 1)\n"
+            "      = −(N · ε_A · l / V) · Φ_AB · t\n\n"
+            "  where A_irr(t) = (ε_A_irr / ε_A_mon) · A_mon(t).\n"
+            "  Valid at all absorbance levels. Produces a linear plot of y(t) vs t.\n"
+            "  Faster but requires ε_B_mon ≈ 0 at the monitoring wavelength."
+        ))
+        self._method_row_widget.setLayout(_mrl)
+        self._method_row_widget.setVisible(False)
+        self._stage4.add_widget(self._method_row_widget)
+
         # Run button
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#555;"); self._stage4.add_widget(sep)
@@ -1074,26 +1415,96 @@ class QuantumYieldTab(QWidget):
         self._stage4.add_widget(self._led_diag_plot)
         self._led_diag_plot.setVisible(False)
 
-        # Summary table
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels([
-            "File", "λ mon (nm)", "Φ_AB", "σ_fit", "σ_total", "R²"])
-        self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        self._table.setMinimumHeight(120)
-        self._table.verticalHeader().setVisible(False)
-        self._stage4.add_widget(self._table)
+        # PSS plateau results (A_thermal_PSS only)
+        sep_pss = QFrame(); sep_pss.setFrameShape(QFrame.Shape.HLine)
+        sep_pss.setStyleSheet("color:#555;"); self._stage4.add_widget(sep_pss)
 
-        # Save CSV
-        save_row = QHBoxLayout()
-        self._save_btn = QPushButton("Save master CSV…")
-        self._save_btn.setEnabled(False)
-        self._save_btn.clicked.connect(self._save_csv)
-        save_row.addWidget(self._save_btn)
-        save_row.addStretch()
-        self._stage4.add_layout(save_row)
+        self._pss_result_grp = QGroupBox("PSS plateau results")
+        prg = QVBoxLayout(self._pss_result_grp)
+        self._pss_result_table = QTableWidget(0, 7)
+        self._pss_result_table.setHorizontalHeaderLabels(
+            ["#", "t_start (s)", "t_end (s)", "Spec#", "A_mon_PSS", "Φ_AB", "σ"])
+        self._pss_result_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self._pss_result_table.setFixedHeight(110)
+        self._pss_result_table.verticalHeader().setVisible(False)
+        self._pss_result_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        prg.addWidget(self._pss_result_table)
+
+        self._pss_result_plot = PlotWidget(
+            info_title="PSS plateau / spectrum plot",
+            info_text="Kinetic trace with plateau windows highlighted, or scanning "
+                      "spectra with PSS spectra overlaid in a different colour.",
+        )
+        self._pss_result_plot.setMinimumHeight(280)
+        prg.addWidget(self._pss_result_plot)
+
+        self._stage4.add_widget(self._pss_result_grp)
+        self._pss_result_grp.setVisible(False)
 
         parent_layout.addWidget(self._stage4)
+
+    # ── Stage 5 — Export & Publication ──────────────────────────────────────
+
+    def _build_stage5(self, parent_layout):
+        self._stage5 = StageCard("Stage 5 — Export & Publication")
+        self._stage5.set_status(WAITING)
+
+        hint = QLabel(
+            "Append new results to the master CSV after each run, then save. "
+            "Use 'Save individual CSVs' to export full kinetic traces per file. "
+            "The publication plot summarises all appended results."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888; font-size:9pt;")
+        self._stage5.add_widget(hint)
+
+        # Individual CSV save
+        indiv_row = QHBoxLayout()
+        self._save_indiv_btn = QPushButton("Save individual result CSVs…")
+        self._save_indiv_btn.setFixedWidth(220)
+        self._save_indiv_btn.setEnabled(False)
+        self._save_indiv_btn.clicked.connect(self._save_individual_csvs)
+        indiv_row.addWidget(self._save_indiv_btn)
+        indiv_row.addStretch()
+        self._stage5.add_layout(indiv_row)
+
+        pss_save_row = QHBoxLayout()
+        self._save_pss_plots_btn = QPushButton("Save PSS plateau/spectra plots…")
+        self._save_pss_plots_btn.setFixedWidth(240)
+        self._save_pss_plots_btn.setEnabled(False)
+        self._save_pss_plots_btn.clicked.connect(self._save_pss_plots)
+        pss_save_row.addWidget(self._save_pss_plots_btn)
+        pss_save_row.addStretch()
+        self._stage5.add_layout(pss_save_row)
+
+        # Master CSV table
+        self._qy_master = MasterCsvTable(
+            columns        = _QY_COLUMNS,
+            header_labels  = _QY_HEADER_LABELS,
+            float_cols     = _QY_FLOAT_COLS,
+            float_fmt      = _QY_FLOAT_FMT,
+            csv_subdir     = "quantum_yield/results",
+            csv_filename   = "qy_master.csv",
+            title_text     = "Master CSV  —  qy_master.csv",
+            sort_column    = "Temperature_C",
+            pre_save_hook  = _qy_summary_hook,
+        )
+        self._stage5.add_widget(self._qy_master)
+
+        # Publication plot
+        self._pub_plot = PlotWidget(
+            info_title="Publication summary",
+            info_text="Bar chart of Φ_AB per measurement with σ_total error bars. "
+                      "Bars are coloured by compound. A reference line is shown "
+                      "if any result carries a reference Φ_AB.",
+        )
+        self._pub_plot.setMinimumHeight(320)
+        self._pub_plot.hide()
+        self._stage5.add_widget(self._pub_plot)
+
+        parent_layout.addWidget(self._stage5)
 
     # ── Stale-result detection ────────────────────────────────────────────────
 
@@ -1131,7 +1542,7 @@ class QuantumYieldTab(QWidget):
 
         # ── Stage 2 ──────────────────────────────────────────────────────────
         for w in (self._case_combo, self._baseline_combo, self._kth_src_combo,
-                  self._pss_src_combo, self._init_src_combo):
+                  self._pss_wl_mode_combo, self._init_src_combo):
             w.currentTextChanged.connect(self._mark_stale)
         for w in (self._temp_spin, self._path_spin, self._vol_spin,
                   self._wl_tol_spin, self._plat_dur_spin,
@@ -1140,14 +1551,20 @@ class QuantumYieldTab(QWidget):
                   self._min_consec_spin, self._fit_start_spin,
                   self._fit_end_spin, self._kth_manual_spin,
                   self._kth_manual_std_spin, self._kth_temp_spin,
-                  self._pss_frac_spin, self._pss_abs_spin,
-                  self._conc_A0_spin, self._conc_B0_spin):
+                  self._pss_n_plat_spin, self._pss_min_dur_spin,
+                  self._pss_wl_lo_spin, self._pss_wl_hi_spin,
+                  self._conc_A0_spin, self._conc_B0_spin,
+                  self._init_plat_start_spin, self._init_plat_end_spin):
             w.valueChanged.connect(self._mark_stale)
         self._auto_detect_chk.toggled.connect(self._mark_stale)
         self._slopes_chk.toggled.connect(self._mark_stale)
         for w in (self._mon_wl_edit, self._solvent_edit,
-                  self._baseline_file_edit, self._kth_csv_edit):
+                  self._baseline_file_edit, self._kth_csv_edit,
+                  self._pss_spec_wl_edit):
             w.textChanged.connect(self._mark_stale)
+
+        # Stage 4 method selector
+        self._method_combo.currentTextChanged.connect(self._mark_stale)
 
         # ── Stage 3 ──────────────────────────────────────────────────────────
         for w in (self._eps_a_src_combo, self._eps_b_src_combo):
@@ -1162,6 +1579,9 @@ class QuantumYieldTab(QWidget):
 
     def _on_data_type_changed(self, text):
         self._scan_grp.setVisible(text == "scanning")
+        if hasattr(self, "_pss_kin_panel"):
+            self._pss_kin_panel.setVisible(text == "kinetic")
+            self._pss_scan_panel.setVisible(text == "scanning")
 
     def _on_flux_src_changed(self, text):
         self._flux_manual_grp.setVisible(text == "manual_mol_s")
@@ -1269,9 +1689,38 @@ class QuantumYieldTab(QWidget):
 
     def _on_case_changed(self, text):
         self._pss_grp.setVisible(text == "A_thermal_PSS")
+        if hasattr(self, "_fit_window_container"):
+            self._fit_window_container.setVisible(text != "A_thermal_PSS")
+
+        # Gray out the whole ε_B group when only A absorbs at irradiation wavelength
+        a_only = text in ("A_only", "A_only_thermal")
+        self._eps_b_grp.setEnabled(not a_only)
+        if a_only:
+            self._eps_b_irr_spin.setValue(0.0)
+            self._eps_b_src_combo.setCurrentText("manual")
+
+        # Gray out Φ_BA initial guess when the case has no B→A photoreaction
+        no_ba = text in ("A_only", "A_only_thermal", "A_thermal_PSS")
+        if hasattr(self, "_qy_ba_init_spin"):
+            self._qy_ba_init_spin.setEnabled(not no_ba)
+            if no_ba:
+                self._qy_ba_init_spin.setValue(0.0)
+
+        # Gray out k_th section when thermal back-reaction is not part of this case
+        thermal = text in ("A_only_thermal", "AB_thermal", "A_thermal_PSS")
+        self._kth_src_combo.setEnabled(thermal)
+        self._kth_manual_grp.setEnabled(thermal)
+        self._kth_csv_grp.setEnabled(thermal)
+        if not thermal:
+            self._kth_src_combo.setCurrentText("none")
+
+        # Method selector: only shown for A_only (linearized alternative)
+        if hasattr(self, "_method_row_widget"):
+            self._method_row_widget.setVisible(text == "A_only")
 
     def _on_init_src_changed(self, text):
         self._init_manual_grp.setVisible(text == "manual")
+        self._init_plateau_grp.setVisible(text == "plateau")
 
     def _on_slopes_toggled(self, checked: bool):
         self._slopes_grp.setVisible(checked)
@@ -1364,6 +1813,99 @@ class QuantumYieldTab(QWidget):
     def _get_file_paths(self) -> list[Path]:
         return [Path(self._file_list.item(i).text())
                 for i in range(self._file_list.count())]
+
+    # ── Data preview ──────────────────────────────────────────────────────────
+
+    def _preview_data(self):
+        from gui.tabs.qy_core import load_kinetic_csv, load_spectra_csv as load_scanning_csv
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        import numpy as np
+
+        paths = self._get_file_paths()
+        if not paths:
+            self._preview_plot.setVisible(False)
+            return
+
+        data_type = self._data_type_combo.currentText()
+        fig, ax = plt.subplots(figsize=(7, 3.8))
+        fig.patch.set_facecolor("#1e1e2e")
+        ax.set_facecolor("#252535")
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#555570")
+        ax.tick_params(colors="#c0c0d0", labelsize=8)
+        ax.xaxis.label.set_color("#c0c0d0")
+        ax.yaxis.label.set_color("#c0c0d0")
+
+        try:
+            if data_type == "kinetic":
+                ax.set_xlabel("Time (s)")
+                ax.set_ylabel("Absorbance")
+                ax.set_title("Kinetic traces — all channels", color="#a0a0c0",
+                             fontsize=9)
+                for path in paths:
+                    channels = load_kinetic_csv(path)
+                    for label, (t, a) in channels.items():
+                        ok = np.isfinite(t) & np.isfinite(a) & (t >= 0)
+                        if ok.sum() < 2:
+                            continue
+                        ax.plot(t[ok], a[ok], lw=1.0,
+                                label=f"{path.stem} | {label}")
+                if ax.lines:
+                    ax.legend(fontsize=7, framealpha=0.3,
+                              facecolor="#252535", labelcolor="#c0c0d0",
+                              loc="best")
+                ax.autoscale()
+
+            else:  # scanning
+                delta_t    = self._delta_t_spin.value()
+                scans_per  = self._scans_per_grp_spin.value()
+                skip_first = self._first_cycle_off_chk.isChecked()
+
+                ax.set_xlabel("Wavelength (nm)")
+                ax.set_ylabel("Absorbance")
+                ax.set_title("Spectra over time (colour = elapsed time)",
+                             color="#a0a0c0", fontsize=9)
+
+                for path in paths:
+                    scans = load_scanning_csv(path)
+                    if skip_first and len(scans) > 1:
+                        scans = scans[1:]
+                    n = len(scans)
+                    cmap = cm.get_cmap("plasma", max(n, 1))
+                    for idx, (wl, ab) in enumerate(scans):
+                        # load_spectra_csv already sorts and range-checks, but
+                        # guard against any remaining non-finite absorbance
+                        ok = np.isfinite(ab)
+                        ax.plot(wl[ok], ab[ok],
+                                color=cmap(idx / max(n - 1, 1)),
+                                lw=0.8, alpha=0.85)
+
+                    # Colour bar via a ScalarMappable
+                    sm = plt.cm.ScalarMappable(
+                        cmap=cmap,
+                        norm=plt.Normalize(0, (n - 1) * delta_t * scans_per))
+                    sm.set_array([])
+                    cb = fig.colorbar(sm, ax=ax, pad=0.02)
+                    cb.set_label("Time (s)", color="#c0c0d0", fontsize=8)
+                    cb.ax.yaxis.set_tick_params(color="#c0c0d0", labelsize=7)
+                    plt.setp(cb.ax.yaxis.get_ticklabels(), color="#c0c0d0")
+                    break  # one colour bar is enough; plot only first file
+
+                ax.autoscale()
+                # ensure negative absorbance values are visible
+                ylo, yhi = ax.get_ylim()
+                if ylo > -0.05:
+                    ax.set_ylim(bottom=min(ylo, -0.05))
+
+        except Exception as exc:
+            ax.text(0.5, 0.5, f"Error loading data:\n{exc}",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color="#f7768e", fontsize=9, wrap=True)
+
+        fig.tight_layout()
+        self._preview_plot.set_figure(fig)
+        self._preview_plot.setVisible(True)
 
     # ── Browse helpers ────────────────────────────────────────────────────────
 
@@ -1485,9 +2027,11 @@ class QuantumYieldTab(QWidget):
             p.auto_detect_min_consec = self._min_consec_spin.value()
         else:
             vs = self._fit_start_spin.value()
-            ve = self._fit_end_spin.value()
             p.fit_time_start_s = vs if vs > 0 else None
-            p.fit_time_end_s   = ve if ve > 0 else None
+
+        # Fit end is always read (spinbox is always visible)
+        ve = self._fit_end_spin.value()
+        p.fit_time_end_s = ve if ve > 0 else None
 
         p.k_th_source = self._kth_src_combo.currentText()
         if p.k_th_source == "manual":
@@ -1499,16 +2043,36 @@ class QuantumYieldTab(QWidget):
             p.k_th_temperature_C = self._kth_temp_spin.value()
 
         if p.case == "A_thermal_PSS":
-            p.pss_source = self._pss_src_combo.currentText()
-            if p.pss_source == "manual_fraction":
-                p.pss_fraction_B_manual = self._pss_frac_spin.value()
+            p.pss_source = "plateaus"
+            if p.data_type == "kinetic":
+                plateaus = self._get_pss_plateaus()
+                p.pss_plateaus = plateaus if plateaus else None
             else:
-                p.pss_A_abs_pss_manual = self._pss_abs_spin.value()
+                indices = self._get_pss_spec_indices()
+                p.pss_spectrum_indices = indices if indices else None
+                mode = self._pss_wl_mode_combo.currentText()
+                if mode == "specific λ(s)":
+                    txt = self._pss_spec_wl_edit.text().strip()
+                    try:
+                        p.pss_mon_wls = [
+                            float(x) for x in
+                            txt.replace(";", ",").split(",") if x.strip()]
+                    except ValueError:
+                        pass
+                elif mode == "λ range":
+                    p.pss_mon_wl_range = (
+                        self._pss_wl_lo_spin.value(),
+                        self._pss_wl_hi_spin.value())
 
         p.initial_conc_source = self._init_src_combo.currentText()
         if p.initial_conc_source == "manual":
             p.initial_conc_A_manual = self._conc_A0_spin.value()
             p.initial_conc_B_manual = self._conc_B0_spin.value()
+        elif p.initial_conc_source == "plateau":
+            vs = self._init_plat_start_spin.value()
+            p.initial_plateau_start_s = vs if vs > 0 else None
+            ve = self._init_plat_end_spin.value()
+            p.initial_plateau_end_s   = ve if ve > 0 else None
 
         # Stage 3 — extinction coefficients
         p.epsilon_source_A = self._eps_a_src_combo.currentText()
@@ -1555,11 +2119,12 @@ class QuantumYieldTab(QWidget):
         params = self._collect_params()
 
         self._run_btn.setEnabled(False)
-        self._save_btn.setEnabled(False)
         self._results.clear()
-        self._table.setRowCount(0)
         self._stage4.set_status(WAITING)
         self._status_lbl.setText(f"Running {len(files)} file(s)…")
+
+        use_linearized = (params.case == "A_only"
+                          and self._method_combo.currentText() == "Exact linearized (log₁₀)")
 
         def _compute():
             # Resolve shared inputs once
@@ -1575,6 +2140,15 @@ class QuantumYieldTab(QWidget):
                 params.epsilon_source_B, params.epsilon_B_csv,
                 params.epsilon_B_col, irr_wl, params.epsilon_B_irr, "B")
 
+            # Resolve ε_A_mon for the linearized method
+            mon_wls_resolved = (
+                [float(w) for w in params.monitoring_wavelengths]
+                if params.monitoring_wavelengths else [irr_wl])
+            eps_a_mon_val = load_epsilon_at_wavelengths(
+                params.epsilon_source_A, params.epsilon_A_csv,
+                params.epsilon_A_col, mon_wls_resolved[:1],
+                params.epsilon_A_irr)[0] if use_linearized else 0.0
+
             # LED ε arrays (if LED full-integration)
             led_eps_a = None
             led_eps_b = None
@@ -1588,10 +2162,15 @@ class QuantumYieldTab(QWidget):
 
             results = []
             for f in files:
-                r = run_qy_file(params, f,
-                                N_mol_s, N_std, k_th, k_th_std,
-                                eps_a_irr, eps_b_irr,
-                                led_wl, led_N, led_eps_a, led_eps_b)
+                if use_linearized:
+                    r = run_qy_linearized(
+                        params, f, N_mol_s, N_std,
+                        eps_a_irr, eps_a_mon_val, k_th)
+                else:
+                    r = run_qy_file(params, f,
+                                    N_mol_s, N_std, k_th, k_th_std,
+                                    eps_a_irr, eps_b_irr,
+                                    led_wl, led_N, led_eps_a, led_eps_b)
                 results.append(r)
             return results
 
@@ -1605,13 +2184,28 @@ class QuantumYieldTab(QWidget):
     def _on_results(self, results: list):
         self._results = results
         self._current_idx = 0
-        self._populate_table()
         self._update_nav()
         self._show_result(0)
         self._stage4.set_status(DONE)
         self._status_lbl.setText(
             f"Done — {len(results)} file(s) processed.")
-        self._save_btn.setEnabled(True)
+        self._save_indiv_btn.setEnabled(True)
+
+        # Feed master CSV (pending rows — user must click Append to commit)
+        rows = [build_qy_master_row(r, j)
+                for r in results
+                for j in range(len(r.mon_wls))]
+        self._qy_master.add_pending(rows)
+
+        # Enable PSS save button if any result has PSS data
+        has_pss = any(
+            r.case == "A_thermal_PSS" and r.pss_plateau_results
+            for r in results)
+        self._save_pss_plots_btn.setEnabled(has_pss)
+
+        # Publication plot
+        self._update_pub_plot()
+        self._stage5.set_status(READY)
 
     def _on_error(self, msg: str):
         self._stage4.set_status(ERROR)
@@ -1659,67 +2253,422 @@ class QuantumYieldTab(QWidget):
         stem = Path(r.file_name).stem if r.file_name else f"qy_{idx}"
         self._plot.set_default_filename(f"{stem}_QY.png")
         self._refresh_led_diag()
+        has_pss = (r.case == "A_thermal_PSS" and bool(r.pss_plateau_results))
+        self._pss_result_grp.setVisible(has_pss)
+        if has_pss:
+            self._populate_pss_result_table(r)
+            self._show_pss_result_plot(r)
 
-    def _populate_table(self):
-        self._table.setRowCount(0)
-        for r in self._results:
-            for j, wl in enumerate(r.mon_wls):
-                row = self._table.rowCount()
-                self._table.insertRow(row)
-                self._table.setItem(row, 0, QTableWidgetItem(r.file_name))
-                self._table.setItem(row, 1, QTableWidgetItem(f"{wl:.1f}"))
-                qy_ab = r.QY_AB_per_wl[j] if j < len(r.QY_AB_per_wl) else r.QY_AB
-                sf    = r.stderr_AB_per_wl[j] if j < len(r.stderr_AB_per_wl) else r.QY_AB_sigma_fit
-                st    = r.sigma_total_per_wl[j] if j < len(r.sigma_total_per_wl) else r.QY_AB_sigma_total
-                r2    = r.r2_per_wl[j] if j < len(r.r2_per_wl) else r.r2
-                self._table.setItem(row, 2, QTableWidgetItem(f"{qy_ab:.5f}"))
-                self._table.setItem(row, 3, QTableWidgetItem(f"{sf:.5f}"))
-                self._table.setItem(row, 4, QTableWidgetItem(f"{st:.5f}"))
-                self._table.setItem(row, 5, QTableWidgetItem(f"{r2:.4f}"))
-
-    # ── Save CSV ──────────────────────────────────────────────────────────────
-
-    def _save_csv(self):
+    def _update_pub_plot(self):
         if not self._results:
             return
-        rows = []
+        fig = plot_qy_publication(self._results)
+        self._pub_plot.set_figure(fig)
+        if self._output_path:
+            self._pub_plot.set_save_dir(
+                self._output_path / "quantum_yield" / "results" / "plots")
+        self._pub_plot.set_default_filename("qy_publication.png")
+        self._pub_plot.show()
+
+    # ── PSS plateau / scan helpers ───────────────────────────────────────────
+
+    def _auto_detect_pss(self):
+        paths = self._get_file_paths()
+        if not paths:
+            return
+        try:
+            from gui.tabs.qy_core import load_kinetic_csv
+            channels = load_kinetic_csv(paths[0])
+            if not channels:
+                return
+            _label0, (t, a) = next(iter(channels.items()))
+            n_plat = self._pss_n_plat_spin.value()
+            min_dur = self._pss_min_dur_spin.value()
+            plateaus = detect_pss_plateaus(t, a, n_plateaus=n_plat,
+                                           min_duration_s=min_dur)
+            self._pss_plat_table.setRowCount(0)
+            for i, (t0, t1) in enumerate(plateaus):
+                r = self._pss_plat_table.rowCount()
+                self._pss_plat_table.insertRow(r)
+                self._pss_plat_table.setItem(r, 0, QTableWidgetItem(str(i + 1)))
+                self._pss_plat_table.setItem(r, 1, QTableWidgetItem(f"{t0:.2f}"))
+                self._pss_plat_table.setItem(r, 2, QTableWidgetItem(f"{t1:.2f}"))
+        except Exception as exc:
+            self.log_signal.emit(f"[PSS] Auto-detect failed: {exc}", "warning")
+        else:
+            self._preview_pss_kinetic()
+
+    def _load_pss_scan_list(self):
+        paths = self._get_file_paths()
+        if not paths:
+            return
+        try:
+            from gui.tabs.qy_core import load_spectra_csv
+            scans = load_spectra_csv(paths[0])
+            self._pss_scan_list.clear()
+            for i in range(len(scans)):
+                item = QListWidgetItem(f"Spectrum {i + 1}")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
+                self._pss_scan_list.addItem(item)
+        except Exception as exc:
+            self.log_signal.emit(f"[PSS] Load scan list failed: {exc}", "warning")
+
+    def _pss_select_last_n(self):
+        n = self._pss_last_n_spin.value()
+        total = self._pss_scan_list.count()
+        for i in range(total):
+            item = self._pss_scan_list.item(i)
+            item.setCheckState(
+                Qt.CheckState.Checked if i >= total - n
+                else Qt.CheckState.Unchecked)
+
+    def _pss_add_plateau_row(self):
+        r = self._pss_plat_table.rowCount()
+        self._pss_plat_table.insertRow(r)
+        self._pss_plat_table.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+        self._pss_plat_table.setItem(r, 1, QTableWidgetItem("0.0"))
+        self._pss_plat_table.setItem(r, 2, QTableWidgetItem("60.0"))
+
+    def _pss_remove_plateau_row(self):
+        rows = sorted({i.row() for i in self._pss_plat_table.selectedItems()},
+                      reverse=True)
+        for r in rows:
+            self._pss_plat_table.removeRow(r)
+
+    def _on_pss_wl_mode_changed(self, text: str):
+        self._pss_spec_wl_grp.setVisible(text == "specific λ(s)")
+        self._pss_range_wl_grp.setVisible(text == "λ range")
+
+    def _get_pss_plateaus(self) -> list:
+        plateaus = []
+        for r in range(self._pss_plat_table.rowCount()):
+            try:
+                t0 = float(self._pss_plat_table.item(r, 1).text())
+                t1 = float(self._pss_plat_table.item(r, 2).text())
+                plateaus.append((t0, t1))
+            except (AttributeError, ValueError):
+                pass
+        return plateaus
+
+    def _get_pss_spec_indices(self) -> list:
+        indices = []
+        for i in range(self._pss_scan_list.count()):
+            item = self._pss_scan_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                indices.append(i)
+        return indices
+
+    def _preview_pss_kinetic(self):
+        paths = self._get_file_paths()
+        if not paths:
+            return
+        try:
+            from gui.tabs.qy_core import load_kinetic_csv
+            import matplotlib.pyplot as plt
+            import matplotlib.cm as cm
+            channels = load_kinetic_csv(paths[0])
+            if not channels:
+                return
+            _lbl, (t, a) = next(iter(channels.items()))
+            plateaus = self._get_pss_plateaus()
+            # Resolve monitoring wavelength label
+            mon_wl = 0.0
+            try:
+                mon_wl = float(str(_lbl).split()[0])
+            except (ValueError, IndexError):
+                pass
+            wl_text = self._mon_wl_edit.text().strip()
+            if wl_text:
+                try:
+                    mon_wl = float(wl_text.replace(";", ",").split(",")[0])
+                except ValueError:
+                    pass
+            fig, ax = plt.subplots(figsize=(7, 3.2))
+            fig.patch.set_facecolor("#1e1e2e")
+            ax.set_facecolor("#252535")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#555570")
+            ax.tick_params(colors="#c0c0d0", labelsize=8)
+            ax.xaxis.label.set_color("#c0c0d0")
+            ax.yaxis.label.set_color("#c0c0d0")
+            ax.plot(t, a, color="#4a9eff", lw=1.2, zorder=2)
+            colors_p = cm.plasma(np.linspace(0.15, 0.85, max(len(plateaus), 1)))
+            for i, (t0, t1) in enumerate(plateaus):
+                col = colors_p[i]
+                ax.axvspan(t0, t1, alpha=0.25, color=col, zorder=1)
+                mask = (t >= t0) & (t <= t1)
+                a_mean = float(a[mask].mean()) if mask.any() else float(np.nanmean(a))
+                ax.axhline(a_mean, color=col, lw=0.9, ls="--", alpha=0.7)
+                mid = (t0 + t1) / 2.0
+                ax.annotate(f"#{i + 1}  A={a_mean:.4f}",
+                            xy=(mid, a_mean), xytext=(0, 6),
+                            textcoords="offset points",
+                            ha="center", fontsize=7, color=col)
+            wl_lbl = f"{mon_wl:.0f} nm" if mon_wl else "?"
+            ax.set_xlabel("Time (s)", color="#c0c0d0")
+            ax.set_ylabel(f"Absorbance ({wl_lbl})", color="#c0c0d0")
+            ax.set_title(f"PSS plateau preview  |  {paths[0].stem}",
+                         color="#a0a0c0", fontsize=9)
+            ax.grid(True, alpha=0.25, color="#555570")
+            fig.tight_layout()
+            self._pss_kin_preview_plot.set_figure(fig)
+            self._pss_kin_preview_plot.setVisible(True)
+        except Exception as exc:
+            self.log_signal.emit(f"[PSS] Kinetic preview failed: {exc}", "warning")
+
+    def _preview_pss_scanning(self):
+        paths = self._get_file_paths()
+        if not paths:
+            return
+        try:
+            from gui.tabs.qy_core import load_spectra_csv
+            scans = load_spectra_csv(paths[0])
+            if not scans:
+                return
+            indices = self._get_pss_spec_indices()
+            mon_wls = []
+            wl_text = self._mon_wl_edit.text().strip()
+            if wl_text:
+                try:
+                    mon_wls = [float(x) for x in
+                               wl_text.replace(";", ",").split(",") if x.strip()]
+                except ValueError:
+                    pass
+            mode = self._pss_wl_mode_combo.currentText()
+            pss_mon_wls = None
+            pss_mon_wl_range = None
+            if mode == "specific \u03bb(s)":
+                txt = self._pss_spec_wl_edit.text().strip()
+                try:
+                    pss_mon_wls = [float(x) for x in
+                                   txt.replace(";", ",").split(",") if x.strip()]
+                except ValueError:
+                    pass
+            elif mode == "\u03bb range":
+                pss_mon_wl_range = (self._pss_wl_lo_spin.value(),
+                                    self._pss_wl_hi_spin.value())
+            delta_t = (self._delta_t_spin.value()
+                       * self._scans_per_grp_spin.value())
+            fig = plot_pss_scanning(
+                scans, indices, mon_wls,
+                pss_mon_wls=pss_mon_wls,
+                pss_mon_wl_range=pss_mon_wl_range,
+                file_name=paths[0].stem,
+                delta_t_s=delta_t,
+            )
+            self._pss_scan_preview_plot.set_figure(fig)
+            self._pss_scan_preview_plot.setVisible(True)
+        except Exception as exc:
+            self.log_signal.emit(f"[PSS] Scan preview failed: {exc}", "warning")
+
+    def _populate_pss_result_table(self, r):
+        self._pss_result_table.setRowCount(0)
+        if not r.pss_plateau_results:
+            return
+        for pr in r.pss_plateau_results:
+            row = self._pss_result_table.rowCount()
+            self._pss_result_table.insertRow(row)
+            self._pss_result_table.setItem(row, 0, QTableWidgetItem(str(pr.idx + 1)))
+            t0 = f"{pr.t_start_s:.2f}" if pr.t_start_s >= 0 else "—"
+            t1 = f"{pr.t_end_s:.2f}" if pr.t_end_s >= 0 else "—"
+            self._pss_result_table.setItem(row, 1, QTableWidgetItem(t0))
+            self._pss_result_table.setItem(row, 2, QTableWidgetItem(t1))
+            spec = str(pr.spectrum_idx) if pr.spectrum_idx >= 0 else "—"
+            self._pss_result_table.setItem(row, 3, QTableWidgetItem(spec))
+            self._pss_result_table.setItem(row, 4,
+                QTableWidgetItem(f"{pr.A_mon_PSS:.5f}"))
+            self._pss_result_table.setItem(row, 5,
+                QTableWidgetItem(f"{pr.QY_AB:.5f}"))
+            self._pss_result_table.setItem(row, 6,
+                QTableWidgetItem(f"{pr.sigma_QY:.5f}"))
+            for c in range(7):
+                item = self._pss_result_table.item(row, c)
+                if item:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def _show_pss_result_plot(self, r):
+        try:
+            is_scan = (r.pss_plateau_results and
+                       r.pss_plateau_results[0].spectrum_idx >= 0)
+            if is_scan:
+                fig = plot_pss_scanning(
+                    r.scans_raw or [],
+                    [pr.spectrum_idx for pr in r.pss_plateau_results],
+                    r.mon_wls,
+                    compound=r.compound or "",
+                    file_name=r.file_name or "",
+                )
+            else:
+                fig = plot_pss_kinetic(
+                    r.time_s, r.abs_data,
+                    r.mon_wls[0] if r.mon_wls else 0.0,
+                    r.pss_plateau_results,
+                    compound=r.compound or "",
+                    file_name=r.file_name or "",
+                )
+            self._pss_result_plot.set_figure(fig)
+            if self._output_path:
+                self._pss_result_plot.set_save_dir(
+                    self._output_path / "quantum_yield" / "results" / "plots")
+            stem = (Path(r.file_name).stem if r.file_name
+                    else f"qy_pss_{self._current_idx}")
+            self._pss_result_plot.set_default_filename(f"{stem}_PSS.png")
+        except Exception as exc:
+            self.log_signal.emit(f"[PSS] Plot failed: {exc}", "warning")
+
+    def _save_pss_plots(self):
+        if not self._results:
+            return
+        import matplotlib.pyplot as plt
+        pss_results = [r for r in self._results
+                       if r.case == "A_thermal_PSS" and r.pss_plateau_results]
+        if not pss_results:
+            return
+        default_dir = (str(self._output_path / "quantum_yield" / "results" / "plots")
+                       if self._output_path else "")
+
+        if len(pss_results) == 1:
+            r = pss_results[0]
+            stem = Path(r.file_name).stem if r.file_name else "qy_pss"
+            default_path = str(Path(default_dir) / f"{stem}_PSS.png")
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Save PSS plot", default_path, "PNG images (*.png);;All files (*)")
+            if not out_path:
+                return
+            out = Path(out_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            is_scan = r.pss_plateau_results[0].spectrum_idx >= 0
+            if is_scan:
+                fig = plot_pss_scanning(
+                    r.scans_raw or [],
+                    [pr.spectrum_idx for pr in r.pss_plateau_results],
+                    r.mon_wls,
+                    compound=r.compound or "",
+                    file_name=r.file_name or "",
+                )
+            else:
+                fig = plot_pss_kinetic(
+                    r.time_s, r.abs_data,
+                    r.mon_wls[0] if r.mon_wls else 0.0,
+                    r.pss_plateau_results,
+                    compound=r.compound or "",
+                    file_name=r.file_name or "",
+                )
+            fig.savefig(str(out), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            self.log_signal.emit(f"[QY-PSS] PSS plot saved → {out.name}", "info")
+            return
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select folder for PSS plots", default_dir)
+        if not folder:
+            return
+        out_dir = Path(folder)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        saved = 0
+        for r in pss_results:
+            try:
+                is_scan = r.pss_plateau_results[0].spectrum_idx >= 0
+                if is_scan:
+                    fig = plot_pss_scanning(
+                        r.scans_raw or [],
+                        [pr.spectrum_idx for pr in r.pss_plateau_results],
+                        r.mon_wls,
+                        compound=r.compound or "",
+                        file_name=r.file_name or "",
+                    )
+                else:
+                    fig = plot_pss_kinetic(
+                        r.time_s, r.abs_data,
+                        r.mon_wls[0] if r.mon_wls else 0.0,
+                        r.pss_plateau_results,
+                        compound=r.compound or "",
+                        file_name=r.file_name or "",
+                    )
+                stem = Path(r.file_name).stem if r.file_name else f"qy_pss_{saved}"
+                out = out_dir / f"{stem}_PSS.png"
+                fig.savefig(str(out), dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                saved += 1
+            except Exception as exc:
+                self.log_signal.emit(
+                    f"[PSS] Save plot failed for {r.file_name}: {exc}", "warning")
+        if saved:
+            self.log_signal.emit(
+                f"[QY-PSS] {saved} PSS plot(s) saved to {out_dir}", "info")
+
+    def _save_individual_csvs(self):
+        if not self._results:
+            return
+        default_dir = (str(self._output_path / "quantum_yield" / "results")
+                       if self._output_path else "")
+
+        if len(self._results) == 1:
+            r0 = self._results[0]
+            stem0 = Path(r0.file_name).stem if r0.file_name else "result"
+            default_path = str(Path(default_dir) / f"{stem0}_QY_kinetics.csv")
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Save individual result CSV", default_path,
+                "CSV files (*.csv);;All files (*)")
+            if not out_path:
+                return
+            out = Path(out_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            df   = build_qy_detail_df(r0)
+            meta = df.attrs.get("header_lines", [])
+            keys, vals = [], []
+            for line in meta:
+                stripped = line.lstrip("#").strip()
+                if " : " in stripped:
+                    k, v = stripped.split(" : ", 1)
+                    keys.append(k.strip()); vals.append(v.strip())
+                else:
+                    keys.append(stripped); vals.append("")
+            n = len(df); pad = max(n - len(keys), 0)
+            out_df = df.copy()
+            out_df["Param_Key"]   = (keys + [""] * pad)[:n]
+            out_df["Param_Value"] = (vals + [""] * pad)[:n]
+            out_df.to_csv(out, index=False)
+            self.log_signal.emit(f"[QY] Individual CSV saved → {out.name}", "info")
+            return
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select folder for individual result CSVs", default_dir)
+        if not folder:
+            return
+        out_dir = Path(folder)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        saved = 0
         for r in self._results:
-            for j, wl in enumerate(r.mon_wls):
-                qy_ab = r.QY_AB_per_wl[j] if j < len(r.QY_AB_per_wl) else r.QY_AB
-                qy_ba = r.QY_BA_per_wl[j] if j < len(r.QY_BA_per_wl) else r.QY_BA
-                sf    = r.stderr_AB_per_wl[j] if j < len(r.stderr_AB_per_wl) else r.QY_AB_sigma_fit
-                st    = r.sigma_total_per_wl[j] if j < len(r.sigma_total_per_wl) else r.QY_AB_sigma_total
-                r2    = r.r2_per_wl[j] if j < len(r.r2_per_wl) else r.r2
-                rows.append({
-                    "File":              r.file_name,
-                    "Compound":          r.compound,
-                    "Case":              r.case,
-                    "Mon_wl_nm":         wl,
-                    "N_mol_s":           r.N_mol_s,
-                    "N_std_mol_s":       r.N_std_mol_s,
-                    "k_th_s":            r.k_th,
-                    "eps_A_irr":         r.eps_A_irr,
-                    "eps_B_irr":         r.eps_B_irr,
-                    "Temperature_C":     r.temperature_C,
-                    "Solvent":           r.solvent,
-                    "QY_AB":             qy_ab,
-                    "QY_BA":             qy_ba,
-                    "sigma_fit_AB":      sf,
-                    "sigma_total_AB":    st,
-                    "R2":                r2,
-                    "Method":            r.method,
-                })
-        df = pd.DataFrame(rows)
-        default_name = "qy_master.csv"
-        default_dir  = str(self._output_path / "quantum_yield" / "results"
-                           if self._output_path else Path.home())
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save QY master CSV",
-            str(Path(default_dir) / default_name),
-            "CSV files (*.csv)")
-        if path:
-            df.to_csv(path, index=False)
-            self.log_signal.emit(f"QY master CSV saved → {path}", "info")
+            df   = build_qy_detail_df(r)
+            meta = df.attrs.get("header_lines", [])
+
+            # Parse "# Key : value" lines into two parallel lists
+            keys, vals = [], []
+            for line in meta:
+                stripped = line.lstrip("#").strip()
+                if " : " in stripped:
+                    k, v = stripped.split(" : ", 1)
+                    keys.append(k.strip())
+                    vals.append(v.strip())
+                else:
+                    keys.append(stripped)
+                    vals.append("")
+
+            # Pad to the DataFrame length, then append as trailing columns
+            n   = len(df)
+            pad = max(n - len(keys), 0)
+            out_df = df.copy()
+            out_df["Param_Key"]   = (keys + [""] * pad)[:n]
+            out_df["Param_Value"] = (vals + [""] * pad)[:n]
+
+            stem = Path(r.file_name).stem if r.file_name else f"result_{saved}"
+            out  = out_dir / f"{stem}_QY_kinetics.csv"
+            out_df.to_csv(out, index=False)
+            saved += 1
+        self.log_signal.emit(
+            f"[QY] {saved} individual CSV(s) saved to {out_dir}", "info")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -1728,6 +2677,10 @@ class QuantumYieldTab(QWidget):
         plots_dir = path / "quantum_yield" / "results" / "plots"
         self._plot.set_save_dir(plots_dir)
         self._led_diag_plot.set_save_dir(plots_dir)
+        if hasattr(self, "_pss_result_plot"):
+            self._pss_result_plot.set_save_dir(plots_dir)
+        if self._qy_master is not None:
+            self._qy_master.set_output_path(path)
 
     def set_raw_path(self, path: Path):
         self._raw_path = path

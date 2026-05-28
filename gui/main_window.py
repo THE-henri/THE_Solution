@@ -14,6 +14,7 @@ from gui.tabs.spectra_tab import SpectraTab
 from gui.tabs.qy_tab import QuantumYieldTab
 from gui.tabs.placeholder_tab import PlaceholderTab
 from gui.tabs.handbook_tab import HandbookTab
+from gui.tabs.spectral_editor_tab import SpectralEditorTab
 from gui.project_prefs import ProjectPrefs
 
 
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._actinometer_tab,                  "Actinometer")
         self._tabs.addTab(self._qy_tab,                           "Quantum Yield")
         self._tabs.addTab(PlaceholderTab("Parameters"),           "Parameters")
+        self._tabs.addTab(SpectralEditorTab(),                    "Spectral Editor")
         self._tabs.addTab(HandbookTab(),                          "Handbook")
 
         splitter.addWidget(self._tabs)
@@ -74,7 +76,9 @@ class MainWindow(QMainWindow):
         self._folder_header.raw_folder_changed.connect(self._actinometer_tab.set_raw_path)
         self._folder_header.raw_folder_changed.connect(self._qy_tab.set_raw_path)
         self._folder_header.raw_folder_changed.connect(self._extinction_coeff_tab.set_raw_path)
+        self._folder_header.raw_folder_changed.connect(self._spectra_tab.set_raw_path)
         self._folder_header.compound_name_changed.connect(self._extinction_coeff_tab.set_compound_name)
+        self._folder_header.compound_name_changed.connect(self._thermal_tab.set_compound_name)
         self._folder_header.output_folder_changed.connect(self._on_output_changed)
         self._folder_header.output_folder_changed.connect(self._log.set_log_dir)
         self._folder_header.prefs_save_requested.connect(self._save_prefs)

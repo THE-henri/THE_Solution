@@ -2,11 +2,13 @@
 Handbook tab — reference documentation for QY Tool methods and calculations.
 """
 
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
-    QTextBrowser, QSplitter,
+    QWidget, QHBoxLayout, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
+    QTextBrowser, QSplitter, QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QFont
 
 
@@ -124,6 +126,34 @@ _CSS = f"""
     }}
     tr:nth-child(even) td {{ background-color: #232333; }}
     a {{ color: {_ACCENT2}; }}
+    .method-box {{
+        background-color: #1a2a1a;
+        border: 1px solid #3a6a3a;
+        border-left: 4px solid {_GREEN};
+        padding: 10px 14px;
+        margin: 14px 0 6px 0;
+    }}
+    .method-box h3 {{
+        color: {_GREEN};
+        font-size: 10pt;
+        margin: 0 0 6px 0;
+    }}
+    .method-box pre {{
+        background: transparent;
+        border: none;
+        color: #c8d8c8;
+        font-size: 9pt;
+        padding: 0;
+        margin: 0;
+        white-space: pre-wrap;
+    }}
+    .save-link {{
+        display: inline-block;
+        margin-top: 8px;
+        color: {_ACCENT2};
+        font-size: 9pt;
+        text-decoration: underline;
+    }}
 """
 
 
@@ -153,25 +183,32 @@ determines the best-fit quantum yield(s).
 <h2>Experimental Cases</h2>
 
 <table>
-  <tr><th>Case</th><th>Description</th><th>Fitted parameters</th></tr>
+  <tr><th>Case</th><th>ε_B_irr</th><th>k_th</th><th>Fitted parameters</th></tr>
   <tr>
     <td><code>A_only</code></td>
-    <td>Only species A absorbs at the irradiation wavelength (ε_B ≈ 0 at λ_irr).
-        The forward reaction A→B is driven by light; no photo-driven back-reaction.</td>
-    <td>Φ_AB (Φ_BA = 0 fixed)</td>
+    <td>0 (forced)</td><td>0 (forced)</td>
+    <td>Φ_AB — irreversible A→B photoreaction. Also supports exact
+        linearized analytical fit (see separate section).</td>
+  </tr>
+  <tr>
+    <td><code>A_only_thermal</code></td>
+    <td>0 (forced)</td><td>required</td>
+    <td>Φ_AB — only A absorbs; B reverts thermally via k_th (T-type switch).</td>
   </tr>
   <tr>
     <td><code>AB_both</code></td>
-    <td>Both A and B absorb at λ_irr.  The forward (A→B) and back (B→A)
-        photo-reactions are fitted simultaneously.</td>
-    <td>Φ_AB and Φ_BA</td>
+    <td>user input</td><td>0 (forced)</td>
+    <td>Φ_AB and Φ_BA — bidirectional photoreaction, no thermal decay.</td>
+  </tr>
+  <tr>
+    <td><code>AB_thermal</code></td>
+    <td>user input</td><td>required</td>
+    <td>Φ_AB and Φ_BA — bidirectional photoreaction plus thermal B→A.</td>
   </tr>
   <tr>
     <td><code>A_thermal_PSS</code></td>
-    <td>Only A absorbs; B thermally reverts to A (rate constant k_th).
-        At the photostationary state (PSS) the net flux into and out of B is zero —
-        this algebraic condition gives Φ_AB directly without ODE fitting.</td>
-    <td>Φ_AB (PSS algebraic)</td>
+    <td>0 (A only)</td><td>required</td>
+    <td>Φ_AB (PSS algebraic, no ODE fitting).</td>
   </tr>
 </table>
 
@@ -807,6 +844,363 @@ verification experiments.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Case: A_only"] = f"""
+<h1>Case: <code>A_only</code></h1>
+
+<p>
+Use this case when only species A absorbs at the irradiation wavelength
+(ε_B_irr ≈ 0) and there is no back-reaction (photochemical or thermal).
+This applies to photobleaching reactions, one-directional P-type photoswitches,
+or the first irradiation step of a bidirectional switch when B has not yet
+accumulated.
+</p>
+
+<h2>ODE</h2>
+<pre class="eq">d[A]/dt = −(N/V) · l · F(t) · ε_A · Φ_AB · [A]
+d[B]/dt = +d[A]/dt
+
+F(t) = (1 − 10^(−ε_A·[A]·l)) / (ε_A·[A]·l)</pre>
+
+<p>
+ε_B_irr and k_th are forced to zero regardless of Stage 3 inputs.
+</p>
+
+<h2>Also available: Exact Linearized Method</h2>
+<p>
+For the A_only case the ODE can be integrated analytically.  Defining
+A_irr(t) = (ε_A_irr / ε_A_mon) · A_mon(t), the exact result is:
+</p>
+<pre class="eq">log₁₀(10^A_irr(t) − 1) − log₁₀(10^A_irr(0) − 1)
+    = −(N · ε_A_irr · l / V) · Φ_AB · t</pre>
+<p>
+Setting y(t) = log₁₀(10^A_irr(t) − 1) gives a straight line whose slope
+directly yields Φ_AB.  Select "Exact linearized (log₁₀)" in Stage 4.
+</p>
+
+<div class="note">
+<b>When to use the linearized method:</b> it is the most rigorous approach for
+pure A_only kinetics because it avoids numerical integration entirely.  It
+requires ε_B_mon ≈ 0 at the monitoring wavelength and that the absorbance
+change is driven solely by consumption of A.
+</div>
+
+<div class="method-box">
+<h3>Method text (copy into manuscript)</h3>
+<pre>
+Quantum yields Φ_AB for the A→B photoisomerisation of [COMPOUND] were
+determined from time-resolved UV/Vis absorbance data recorded at
+[MONITORING WAVELENGTH(S)] nm.  Solutions in [SOLVENT] at [TEMPERATURE] °C
+were irradiated at [IRRADIATION WAVELENGTH] nm using [LIGHT SOURCE] (photon
+flux N = [VALUE] mol s⁻¹, determined by [METHOD]).  Assuming species B does
+not absorb at the irradiation wavelength, the rate equation is:
+
+  d[A]/dt = −(N/V)·l·F(t)·ε_A·Φ_AB·[A],   F(t) = (1−10^(−A_irr(t)))/A_irr(t)
+
+Φ_AB was extracted by numerical integration of the ODE and Levenberg–Marquardt
+least-squares minimisation (lmfit) of the residuals between simulated and
+measured absorbance traces.  Total uncertainty: σ_total = √(σ_fit² + σ_I₀²).
+</pre>
+<a class="save-link" href="save_word:///A_only">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Case: A_only_thermal"] = f"""
+<h1>Case: <code>A_only_thermal</code></h1>
+
+<p>
+Use this case for negative (T-type) photoswitches where only A absorbs at the
+irradiation wavelength and B thermally relaxes back to A with a known rate
+constant k_th.  This is the most common case for thermally reversible
+photoswitches measured before the system reaches the photostationary state.
+</p>
+
+<h2>ODE</h2>
+<pre class="eq">d[A]/dt = −(N/V)·l·F(t)·ε_A·Φ_AB·[A] + k_th·[B]
+d[B]/dt = +(N/V)·l·F(t)·ε_A·Φ_AB·[A] − k_th·[B]
+
+F(t) = (1 − 10^(−ε_A·[A]·l)) / (ε_A·[A]·l)</pre>
+
+<p>
+ε_B_irr is forced to zero.  k_th must be supplied via the Stage 2 k_th source
+(from half-life measurements, Eyring, or Arrhenius analysis).  Only Φ_AB is
+fitted; k_th is held fixed.
+</p>
+
+<h2>When k_th matters</h2>
+<p>
+If irradiation is fast compared to thermal relaxation (k_th · τ_irr ≪ 1), the
+system behaves as A_only and k_th can be neglected.  When k_th · τ_irr ≳ 0.1,
+the thermal term significantly retards the observed conversion rate and must be
+included to avoid overestimating Φ_AB.
+</p>
+
+<div class="note">
+<b>k_th temperature matching:</b> always set k_th at the same temperature as
+the irradiation experiment.  Use the Eyring or Arrhenius source for
+temperature-dependent extrapolation.
+</div>
+
+<div class="method-box">
+<h3>Method text (copy into manuscript)</h3>
+<pre>
+Quantum yields Φ_AB for the photoisomerisation A→B of [COMPOUND] (T-type
+photoswitch) were determined from time-resolved UV/Vis absorbance data at
+[MONITORING WAVELENGTH(S)] nm.  Solutions in [SOLVENT] at [TEMPERATURE] °C
+were irradiated at [IRRADIATION WAVELENGTH] nm (N = [VALUE] mol s⁻¹).
+Only species A absorbs at the irradiation wavelength.  Species B undergoes
+first-order thermal relaxation (k_th = [VALUE] s⁻¹ at [TEMPERATURE] °C,
+t½ = [VALUE] s, from independent dark-recovery experiments).  The rate
+equation is:
+
+  d[A]/dt = −(N/V)·l·F(t)·ε_A·Φ_AB·[A] + k_th·[B]
+
+The ODE was integrated numerically; Φ_AB was determined by Levenberg–Marquardt
+least-squares minimisation with k_th held fixed.
+σ_total = √(σ_fit² + σ_I₀²).
+</pre>
+<a class="save-link" href="save_word:///A_only_thermal">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Case: AB_both"] = f"""
+<h1>Case: <code>AB_both</code></h1>
+
+<p>
+Use when both A and B absorb at the irradiation wavelength and there is no
+thermal back-reaction.  Both Φ_AB (A→B) and Φ_BA (B→A) are fitted
+simultaneously.  Typical use: P-type photoswitches under prolonged irradiation
+where B accumulates and starts driving the reverse reaction.
+</p>
+
+<h2>ODE</h2>
+<pre class="eq">d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B] − ε_A·Φ_AB·[A])
+d[B]/dt = −d[A]/dt
+
+A_tot = (ε_A·[A] + ε_B·[B])·l
+F(t)  = (1 − 10^(−A_tot)) / A_tot</pre>
+
+<p>
+k_th is forced to zero.  ε_B at the irradiation wavelength must be provided.
+</p>
+
+<h2>Notes on identifiability</h2>
+<p>
+Fitting both Φ_AB and Φ_BA simultaneously requires good signal contrast between
+the two directions.  If B is less absorbing (ε_B ≪ ε_A), the back-reaction term
+is small and Φ_BA is poorly constrained — consider using A_only in this regime
+and reporting only Φ_AB.
+</p>
+
+<div class="method-box">
+<h3>Method text (copy into manuscript)</h3>
+<pre>
+Forward (Φ_AB) and reverse (Φ_BA) quantum yields for the photoisomerisation
+A ⇌ B of [COMPOUND] were determined simultaneously from time-resolved UV/Vis
+absorbance data at [MONITORING WAVELENGTH(S)] nm.  Solutions in [SOLVENT] at
+[TEMPERATURE] °C were irradiated at [IRRADIATION WAVELENGTH] nm
+(N = [VALUE] mol s⁻¹).  Both isomers absorb at the irradiation wavelength
+(ε_A = [VALUE], ε_B = [VALUE] M⁻¹ cm⁻¹).  The coupled rate equations are:
+
+  d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B] − ε_A·Φ_AB·[A])
+
+with F(t) = (1−10^(−A_tot(t)))/A_tot(t).  Φ_AB and Φ_BA were extracted by
+Levenberg–Marquardt minimisation; uncertainties σ_total = √(σ_fit² + σ_I₀²).
+</pre>
+<a class="save-link" href="save_word:///AB_both">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Case: AB_thermal"] = f"""
+<h1>Case: <code>AB_thermal</code></h1>
+
+<p>
+Use when both isomers absorb at the irradiation wavelength <em>and</em> B
+undergoes thermal relaxation.  All three driving terms are active simultaneously.
+Φ_AB and Φ_BA are fitted; k_th is held fixed.
+</p>
+
+<h2>ODE</h2>
+<pre class="eq">d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B] − ε_A·Φ_AB·[A]) + k_th·[B]
+d[B]/dt = −d[A]/dt
+
+A_tot = (ε_A·[A] + ε_B·[B])·l
+F(t)  = (1 − 10^(−A_tot)) / A_tot</pre>
+
+<p>
+Both ε_B_irr and k_th must be supplied.
+</p>
+
+<div class="warn">
+<b>Parameter correlation:</b> in this case Φ_BA and k_th both contribute to
+depletion of B.  If k_th is uncertain, this uncertainty propagates directly
+into Φ_BA.  Always use independently measured k_th.
+</div>
+
+<div class="method-box">
+<h3>Method text (copy into manuscript)</h3>
+<pre>
+Forward (Φ_AB) and reverse (Φ_BA) quantum yields were determined for
+[COMPOUND] in [SOLVENT] at [TEMPERATURE] °C under [IRRADIATION WAVELENGTH] nm
+irradiation (N = [VALUE] mol s⁻¹).  Both isomers absorb at the irradiation
+wavelength (ε_A = [VALUE], ε_B = [VALUE] M⁻¹ cm⁻¹) and B undergoes thermal
+relaxation (k_th = [VALUE] s⁻¹, from dark-recovery experiments).  The rate
+equations are:
+
+  d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B] − ε_A·Φ_AB·[A]) + k_th·[B]
+
+k_th was held fixed; Φ_AB and Φ_BA were the free parameters in the
+Levenberg–Marquardt fit.  σ_total = √(σ_fit² + σ_I₀²).
+</pre>
+<a class="save-link" href="save_word:///AB_thermal">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Case: A_thermal_PSS (algebraic)"] = f"""
+<h1>Case: <code>A_thermal_PSS</code> — PSS Algebraic Method</h1>
+
+<p>
+When continuous irradiation drives the system to a photostationary state (PSS),
+Φ_AB can be extracted algebraically without ODE fitting.  This is only valid
+when B reverts thermally and the PSS is measurable.
+</p>
+
+<h2>Derivation</h2>
+<p>
+At PSS d[B]/dt = 0, so the photochemical production of B equals its thermal
+consumption:
+</p>
+<pre class="eq">Φ_AB · N · (1 − 10^(−A_PSS)) / V = k_th · [B]_PSS</pre>
+
+<p>Rearranging:</p>
+<pre class="eq">Φ_AB = k_th · [B]_PSS · V / (N · (1 − 10^(−A_PSS)))</pre>
+
+<h2>Linearized analytical solution for A_only (no PSS)</h2>
+<p>
+If PSS is not reached (e.g. only a fraction of A is converted), use the
+<code>A_only_thermal</code> ODE case instead.  For <code>A_only</code> with no
+thermal term, the exact analytical solution is:
+</p>
+<pre class="eq">log₁₀(10^A_irr(t) − 1) − log₁₀(10^A_irr(0) − 1)
+    = −(N · ε_A · l / V) · Φ_AB · t</pre>
+<p>(See the <b>Case: A_only</b> section for details.)</p>
+
+<div class="method-box">
+<h3>Method text (copy into manuscript)</h3>
+<pre>
+The quantum yield Φ_AB for the A→B photoisomerisation of [COMPOUND] was
+determined from the photostationary state reached under irradiation at
+[IRRADIATION WAVELENGTH] nm.  Solutions in [SOLVENT] at [TEMPERATURE] °C were
+irradiated until the absorbance plateau (PSS) was reached.  At PSS:
+
+  Φ_AB = k_th · [B]_PSS · V / (N · (1 − 10^(−A_PSS)))
+
+with k_th = [VALUE] s⁻¹ (t½ = [VALUE] s at [TEMPERATURE] °C, from independent
+half-life measurements), N = [VALUE] mol s⁻¹, [B]_PSS = [VALUE] mol L⁻¹,
+A_PSS = [VALUE] (absorbance at irradiation wavelength at PSS), and V = [VALUE] L.
+</pre>
+<a class="save-link" href="save_word:///A_thermal_PSS">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS["Exact Linearized Method (A_only)"] = f"""
+<h1>Exact Linearized Method — <code>A_only</code> Case</h1>
+
+<p>
+For the A_only case (ε_B_irr = 0, Φ_BA = 0, k_th = 0) the ODE separates
+exactly, yielding an analytical solution that is linear when plotted correctly.
+This avoids numerical integration entirely and provides a transparent diagnostic
+plot.
+</p>
+
+<h2>Derivation</h2>
+
+<p>Starting from the A_only ODE:</p>
+<pre class="eq">d[A]/dt = −(N/V) · Φ_AB · (1 − 10^(−ε_A·[A]·l))</pre>
+
+<p>
+Since A_irr(t) = ε_A_irr · [A](t) · l is the absorbance at the irradiation
+wavelength, dA_irr/dt = ε_A · l · d[A]/dt, giving:
+</p>
+<pre class="eq">dA_irr / (1 − 10^(−A_irr)) = −(N · ε_A · l / V) · Φ_AB · dt</pre>
+
+<p>The left-hand side integrates exactly:</p>
+<pre class="eq">∫ dA / (1 − 10^(−A)) = log₁₀(10^A − 1)  +  const</pre>
+
+<p>So the exact integrated equation is:</p>
+<pre class="eq">log₁₀(10^A_irr(t) − 1) − log₁₀(10^A_irr(0) − 1)
+    = −(N · ε_A_irr · l / V) · Φ_AB · t</pre>
+
+<p>
+When A and B are monitored at a different wavelength than irradiation,
+A_irr(t) is reconstructed from the monitored absorbance A_mon(t) using:
+</p>
+<pre class="eq">A_irr(t) = (ε_A_irr / ε_A_mon) · A_mon(t)</pre>
+
+<p>This conversion assumes ε_B_mon ≈ 0.</p>
+
+<h2>Linearization and Fit</h2>
+<p>
+Setting y(t) = log₁₀(10^A_irr(t) − 1) gives:
+</p>
+<pre class="eq">y(t) = y(0)  −  (N · ε_A_irr · l / V) · Φ_AB · t</pre>
+<p>
+A plot of y(t) vs t is a straight line.  Ordinary linear regression gives the
+slope, from which:
+</p>
+<pre class="eq">Φ_AB = |slope| · V / (N · ε_A_irr · l)</pre>
+
+<h2>Comparison with ODE fit</h2>
+<table>
+  <tr><th></th><th>ODE fit</th><th>Exact linearized</th></tr>
+  <tr><td>Validity</td>
+      <td>All cases (A_only, AB_both, thermal)</td>
+      <td>A_only only (ε_B = 0, k_th = 0)</td></tr>
+  <tr><td>Method</td>
+      <td>Numerical integration + nonlinear minimisation</td>
+      <td>Analytical integration + linear regression</td></tr>
+  <tr><td>Speed</td>
+      <td>Slower (iterative)</td>
+      <td>Fast (one-pass)</td></tr>
+  <tr><td>Diagnostic plot</td>
+      <td>Absorbance vs time</td>
+      <td>y(t) = log₁₀(10^A − 1) vs time — linear</td></tr>
+  <tr><td>Caveat</td>
+      <td>—</td>
+      <td>Requires ε_B_mon ≈ 0</td></tr>
+</table>
+
+<div class="note">
+Both methods should give identical Φ_AB within uncertainty when the A_only
+assumption holds.  If they disagree, check ε_B_mon, baseline correction, and
+whether B absorbs at the monitoring wavelength.
+</div>
+
+<div class="method-box">
+<h3>Method text — exact linearized (copy into manuscript)</h3>
+<pre>
+The quantum yield Φ_AB for the A→B photoisomerisation of [COMPOUND] was
+determined using the exact analytical solution of the A_only photokinetic ODE.
+The integrated rate law:
+
+  log₁₀(10^A_irr(t) − 1) − log₁₀(10^A_irr(0) − 1)
+      = −(N · ε_A_irr · l / V) · Φ_AB · t
+
+where A_irr(t) = (ε_A_irr / ε_A_mon) · A_mon(t), gives a linear plot of
+y(t) = log₁₀(10^A_irr(t) − 1) vs t.  Φ_AB was extracted from the slope by
+ordinary linear regression.  Photon flux N = [VALUE] mol s⁻¹ (from [METHOD]);
+ε_A_irr = [VALUE], ε_A_mon = [VALUE] M⁻¹ cm⁻¹.
+σ_total = √(σ_fit² + σ_I₀²).
+</pre>
+<a class="save-link" href="save_word:///A_only_linearized">⬇ Save as Word document…</a>
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 _SECTIONS_LED["LED Actinometry — Overview"] = f"""
 <h1>LED Actinometry — Overview</h1>
 
@@ -1357,18 +1751,299 @@ Each pair of columns is one spectrum (wavelength, absorbance).
 """
 
 
+# ── Spectra sections ───────────────────────────────────────────────────────────
+
+_SECTIONS_SPECTRA: dict[str, str] = {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_SPECTRA["Spectra — Overview"] = f"""
+<h1>Spectral Extraction of Species B</h1>
+
+<p>
+The Spectra tab extracts the pure-component spectrum of species B (the photoproduct)
+from UV/Vis spectra recorded during irradiation, given the pure spectrum of species A
+(the starting material).
+</p>
+
+<h2>Four Extraction Modes</h2>
+<table>
+  <tr><th>Mode</th><th>Input required</th><th>Best for</th></tr>
+  <tr>
+    <td><code>negative</code></td>
+    <td>S_A + irradiation series <em>or</em> single PSS spectrum</td>
+    <td>B-transparent reference wavelength exists; robust and exact when
+        the reference region is clean.</td>
+  </tr>
+  <tr>
+    <td><code>negative_pca</code></td>
+    <td>S_A + irradiation series (≥3 spectra)</td>
+    <td>A bleaches during irradiation; PCA extrapolates to the fully-converted
+        limit via a non-negativity constraint.</td>
+  </tr>
+  <tr>
+    <td><code>positive_pca</code></td>
+    <td>S_A + irradiation series (≥3 spectra)</td>
+    <td>B builds up during irradiation; same PCA approach, opposite sign direction.</td>
+  </tr>
+  <tr>
+    <td><code>positive_pss</code></td>
+    <td>S_A + PSS spectrum (no series needed)</td>
+    <td>PSS composition f_B is known from NMR, HPLC, or bleaching ratio.</td>
+  </tr>
+</table>
+
+<h2>Workflow</h2>
+<ol>
+  <li><b>Stage 1</b> — Load initial spectrum CSV (pure A) and, depending on mode,
+      an irradiation series and/or PSS spectrum CSV(s).  Click <b>Load &amp; Preview</b>.</li>
+  <li>Use the checklist to enable/disable individual irradiation spectra.</li>
+  <li><b>Stage 2</b> — Select mode, set compound name and concentration,
+      configure mode-specific parameters.</li>
+  <li><b>Stage 3</b> — Click <b>Run Extraction</b>.  View the extracted S_B spectrum
+      with uncertainty band; optionally enable diagnostic plots.</li>
+  <li>Save the result CSV for use in the Extinction Coefficient or QY tabs.</li>
+</ol>
+
+<h2>Output CSV Format</h2>
+<pre>Wavelength_nm,Species_A,Species_B,Species_B_lo,Species_B_hi,Species_B_std
+  300,         0.1234,   0.0089,   0.0050,        0.0128,      0.0039
+  …</pre>
+<p>Header rows starting with <code>#</code> record the extraction parameters for
+traceability.
+</p>
+
+<div class="note">
+<b>Only a single PSS spectrum, no irradiation series?</b>  Use <code>negative</code>
+mode with the PSS file loaded via "Select PSS files" and the irradiation slot left
+empty — the code automatically detects this and uses the PSS spectrum directly to
+compute α from the reference region.  Alternatively use <code>positive_pss</code>
+mode and enter f_B.
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_SPECTRA["Spectra — Negative mode"] = f"""
+<h1>Negative Mode — Reference-λ Subtraction</h1>
+
+<p>
+The <b>negative mode</b> assumes a wavelength (or region) λ_ref where species B is
+transparent and only A absorbs.  The mixing fraction α for each spectrum is:
+</p>
+<pre class="eq">α_i = S_i(λ_ref) / S_A(λ_ref)</pre>
+<p>Subtracting the A contribution and rescaling gives the pure-B estimate:</p>
+<pre class="eq">S_B,i(λ) = (S_i(λ) − α_i · S_A(λ)) / (1 − α_i)</pre>
+
+<h2>Reference Wavelength</h2>
+<ul>
+  <li><b>Single:</b> <code>500</code> — exact point, sensitive to noise.</li>
+  <li><b>Band:</b> <code>490:520</code> — average over range; more robust.</li>
+  <li><b>List:</b> <code>490,510,520</code> — average over specific points.</li>
+</ul>
+<p>
+If <b>Weighted reference</b> is checked, α is estimated by least-squares over all
+reference points — more robust when multiple points are given.
+</p>
+
+<h2>α Window Filter (irradiation series only)</h2>
+<p>
+Only spectra with α in [min_α, max_α] are used.  Early spectra (α ≈ 1, no conversion)
+amplify noise when dividing by (1−α) ≈ 0; over-converted spectra (α ≈ 0) may violate
+the two-species model.  Default: [0.20, 0.60].  Set [0, 1] to include everything.
+</p>
+
+<h2>Single-PSS-Spectrum Path</h2>
+<p>
+If no irradiation series is loaded but a PSS spectrum file is provided, the negative
+mode uses the PSS spectrum directly (n_series = 0 triggers this automatically):
+</p>
+<ol>
+  <li>α is computed from S_PSS at the reference wavelength.</li>
+  <li>S_B = (S_PSS − α·S_A) / (1−α) — single algebraic formula.</li>
+  <li>Uncertainty is propagated analytically (see below).</li>
+</ol>
+<div class="note">
+Load the PSS spectrum via <b>"Select PSS files"</b> and leave the irradiation file slot
+empty.  The reference wavelength must still be set — choose a region where B does not
+absorb.
+</div>
+
+<h2>Uncertainty — Multi-spectrum path</h2>
+<p>
+Each spectrum i gives an independent estimate S_B,i.  The band reported is the
+standard deviation of these estimates (not the standard error of the mean — it is
+a conservative, spread-based measure):
+</p>
+<pre class="eq">S_B(λ)    = mean_i {{ S_B,i(λ) }}
+σ_SB(λ)   = std_i  {{ S_B,i(λ) }}   (ddof = 1)
+S_B_lo/hi = S_B ± σ_SB</pre>
+<p>
+Narrower bands indicate more consistent B estimates across the series.
+</p>
+
+<h2>Uncertainty — PSS-only path</h2>
+<p>
+With a single PSS spectrum there is no empirical ensemble.  Uncertainty is propagated
+analytically from the uncertainty in α:
+</p>
+<pre class="eq">σ_baseline = std( S_A[last 50 nm of spectrum] )   ← instrument noise floor
+σ_α        = σ_baseline / mean( S_A[λ_ref] )</pre>
+<p>
+α enters S_B non-linearly, so the first-order propagation is:
+</p>
+<pre class="eq">dS_B/dα  = (S_PSS − S_A) / (1 − α)²
+σ_SB(λ)  = |dS_B/dα(λ)| · σ_α</pre>
+
+<p>
+The band is <b>spectrum-shaped</b>: large where |S_PSS − S_A| is large (main
+absorption bands), small in flat regions.  It grows steeply as α → 1 (high conversion,
+small 1−α denominator).
+</p>
+
+<div class="note">
+<b>What this uncertainty captures:</b> only the effect of measurement noise in the
+reference region propagated through α.  It does <em>not</em> capture systematic errors
+from B absorbing at λ_ref, instrument non-linearity, or sample variability.  Always
+verify the reference region is B-transparent.
+</div>
+
+<div class="warn">
+<b>Critical assumption:</b> If B absorbs at the reference wavelength, α is
+underestimated and S_B is systematically biased — in a way the error band cannot
+reveal.  Confirm with independent data (e.g. known B spectrum, or comparison with the
+multi-spectrum method) that λ_ref is truly B-transparent.
+</div>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_SPECTRA["Spectra — PCA modes"] = f"""
+<h1>PCA Extraction Modes</h1>
+
+<p>
+PCA modes use SVD of the difference matrix D = (irradiation series) − S_A to find
+the dominant spectral change pattern and extrapolate it to the fully-converted limit
+via a non-negativity constraint.
+</p>
+
+<h2>Mathematical Basis</h2>
+<p>
+Each spectrum in the series is a mixture:
+</p>
+<pre class="eq">S_i(λ) = α_i · S_A(λ) + (1 − α_i) · S_B(λ)
+D_i(λ) = S_i − S_A = (1 − α_i) · (S_B − S_A) = score_i · PC1(λ)</pre>
+<p>
+The first principal component PC1 captures the dominant spectral change.
+Extrapolating to the largest plausible scale factor s gives S_B = S_A + s · PC1.
+</p>
+
+<h3>Scale factor determination</h3>
+<p>The scale factor s is the larger of:</p>
+<ul>
+  <li><code>s_lower</code> = max(scores) — S_B is at least as converted as the
+      most-converted spectrum in the series.</li>
+  <li><code>s_nn</code> — the largest s such that S_B ≥ −σ_tolerance everywhere
+      (non-negativity: absorbance cannot go below zero).</li>
+</ul>
+
+<h3>Mode sign</h3>
+<table>
+  <tr><th>Mode</th><th>Physical direction</th></tr>
+  <tr><td><code>negative_pca</code></td>
+      <td>A bleaches (absorption decreases); PC1 oriented so scores increase.</td></tr>
+  <tr><td><code>positive_pca</code></td>
+      <td>B builds up (new absorption); PC1 oriented so scores increase.</td></tr>
+</table>
+
+<h2>Bootstrap Confidence Interval</h2>
+<p>
+Default 2000 resamples of D (rows with replacement), each processed through the
+same SVD + non-negativity procedure.  The 2.5th–97.5th percentile of the resulting
+S_B estimates forms the 95% CI.  Resamples producing negative S_B values are
+discarded.
+</p>
+
+<h2>Diagnostic Plots</h2>
+<p>Enable <b>Show diagnostics</b> to see PC1 scores vs. spectrum index (conversion
+progress) and 100 bootstrap S_B estimates coloured by scale factor.  Annotations
+flag insufficient conversion or PC1 ≈ −S_A (B has very low absorbance).
+</p>
+
+<h2>When to use PCA vs. negative mode</h2>
+<table>
+  <tr><th></th><th>negative</th><th>negative_pca / positive_pca</th></tr>
+  <tr><td>Reference wavelength needed?</td><td>Yes</td><td>No (data-driven)</td></tr>
+  <tr><td>Works with single PSS?</td><td>Yes (PSS-only path)</td><td>No</td></tr>
+  <tr><td>Bootstrap CI?</td><td>No (empirical std)</td><td>Yes</td></tr>
+  <tr><td>Systematic bias from B at ref λ?</td><td>Yes</td><td>No</td></tr>
+  <tr><td>Minimum spectra required</td><td>2</td><td>3</td></tr>
+</table>
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+_SECTIONS_SPECTRA["Spectra — positive_pss mode"] = f"""
+<h1>positive_pss Mode — Known PSS Composition</h1>
+
+<p>
+If the fraction of B at the photostationary state f_B is known (from NMR, HPLC,
+or a bleaching ratio), the pure-B spectrum is extracted algebraically:
+</p>
+<pre class="eq">S_B(λ) = (S_PSS(λ) − (1 − f_B) · S_A(λ)) / f_B</pre>
+
+<p>
+Only the initial spectrum S_A and the PSS spectrum S_PSS are required — no
+irradiation series is needed.
+</p>
+
+<h2>Auto-computing f_B from bleaching</h2>
+<p>
+For a negative photoswitch where only A absorbs at an observation wavelength λ_obs:
+</p>
+<pre class="eq">f_B = 1 − S_PSS(λ_obs) / S_A(λ_obs)</pre>
+<p>
+Enable <b>Auto-compute f_B from bleaching at observation λ</b> and set λ_obs to the
+absorption maximum of A.  The computed f_B is shown in real-time after loading data.
+</p>
+
+<h2>Uncertainty Propagation</h2>
+<p>
+The ± error on f_B is propagated through the extraction formula by evaluating S_B
+at f_B ± σ_fB:
+</p>
+<pre class="eq">S_B_lo = (S_PSS − (1 − (f_B + σ_fB)) · S_A) / (f_B + σ_fB)
+S_B_hi = (S_PSS − (1 − (f_B − σ_fB)) · S_A) / (f_B − σ_fB)
+σ_SB   = (S_B_hi − S_B_lo) / 2</pre>
+<p>
+Set the <b>± error</b> field to the 1σ uncertainty on f_B from your analytical method
+(typical: 0.02–0.05 for NMR integration).
+</p>
+
+<div class="note">
+<b>No irradiation series needed:</b> leave the irradiation file slot empty.
+</div>
+
+<div class="warn">
+<b>Validity:</b> The formula assumes mass balance ([A] + [B] = const, no side
+products or degradation).  If the total absorbance in a transparent spectral region
+drifts during irradiation, material is being lost and the extraction will be biased.
+</div>
+"""
+
+
 # ── Tab widget ─────────────────────────────────────────────────────────────────
 
 class HandbookTab(QWidget):
     """
-    Handbook tab with a sidebar navigation list and an HTML content browser.
+    Handbook tab with a collapsible tree navigation and an HTML content browser.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._sections_map: dict[str, str] = {}
+        for d in (_SECTIONS, _SECTIONS_LED, _SECTIONS_SPECTRA):
+            self._sections_map.update(d)
         self._build_ui()
-        # Select first section
-        self._nav.setCurrentRow(0)
+        top = self._nav.topLevelItem(0)
+        if top and top.childCount() > 0:
+            self._nav.setCurrentItem(top.child(0))
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -1378,28 +2053,33 @@ class HandbookTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        # ── Navigation list ────────────────────────────────────────────────
-        self._nav = QListWidget()
+        # ── Navigation tree ────────────────────────────────────────────────
+        self._nav = QTreeWidget()
         self._nav.setObjectName("handbook_nav")
-        self._nav.setFixedWidth(220)
+        self._nav.setFixedWidth(240)
+        self._nav.setHeaderHidden(True)
+        self._nav.setIndentation(14)
+        self._nav.setAnimated(True)
+
         font = QFont("Segoe UI", 9)
         self._nav.setFont(font)
-
         heading_font = QFont("Segoe UI", 8)
         heading_font.setBold(True)
 
         def _add_group(label: str, sections: dict):
-            h = QListWidgetItem(f"  {label}")
-            h.setFlags(Qt.ItemFlag.NoItemFlags)
-            h.setFont(heading_font)
-            self._nav.addItem(h)
+            grp = QTreeWidgetItem(self._nav)
+            grp.setText(0, label)
+            grp.setFont(0, heading_font)
+            grp.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            grp.setExpanded(False)
             for title in sections:
-                item = QListWidgetItem(f"   {title}")
-                item.setData(Qt.ItemDataRole.UserRole, title)
-                self._nav.addItem(item)
+                child = QTreeWidgetItem(grp)
+                child.setText(0, f"  {title}")
+                child.setData(0, Qt.ItemDataRole.UserRole, title)
 
         _add_group("QUANTUM YIELD", _SECTIONS)
         _add_group("LED / ACTINOMETRY", _SECTIONS_LED)
+        _add_group("SPECTRA EXTRACTION", _SECTIONS_SPECTRA)
 
         self._nav.currentItemChanged.connect(self._on_nav_changed)
 
@@ -1407,41 +2087,50 @@ class HandbookTab(QWidget):
         self._browser = QTextBrowser()
         self._browser.setObjectName("handbook_browser")
         self._browser.setOpenExternalLinks(False)
+        self._browser.setOpenLinks(False)
         self._browser.document().setDefaultStyleSheet(_CSS)
+        self._browser.anchorClicked.connect(self._on_anchor_clicked)
 
         splitter.addWidget(self._nav)
         splitter.addWidget(self._browser)
-        splitter.setSizes([220, 900])
+        splitter.setSizes([240, 900])
 
         root.addWidget(splitter)
 
-        # ── Nav list extra styling ─────────────────────────────────────────
+        # ── Tree styling ───────────────────────────────────────────────────
         self._nav.setStyleSheet(f"""
-            QListWidget {{
+            QTreeWidget {{
                 background: #181828;
                 border: none;
                 border-right: 1px solid {_BORDER};
                 outline: none;
             }}
-            QListWidget::item {{
+            QTreeWidget::item {{
                 color: {_TEXT_DIM};
-                padding: 5px 4px;
+                padding: 4px 2px;
                 border: none;
             }}
-            QListWidget::item:selected {{
+            QTreeWidget::item:selected {{
                 background: #252545;
                 color: {_ACCENT2};
                 border-left: 3px solid {_ACCENT};
             }}
-            QListWidget::item:hover:!selected {{
+            QTreeWidget::item:hover:!selected {{
                 background: #1e1e3a;
                 color: {_TEXT};
             }}
-            QListWidget::item:disabled {{
-                color: #555577;
-                font-size: 8pt;
-                letter-spacing: 0.5px;
-                padding-top: 10px;
+            QTreeWidget::branch {{
+                background: #181828;
+            }}
+            QTreeWidget::branch:has-children:!has-siblings:closed,
+            QTreeWidget::branch:closed:has-children:has-siblings {{
+                border-image: none;
+                image: none;
+            }}
+            QTreeWidget::branch:open:has-children:!has-siblings,
+            QTreeWidget::branch:open:has-children:has-siblings {{
+                border-image: none;
+                image: none;
             }}
         """)
 
@@ -1456,11 +2145,31 @@ class HandbookTab(QWidget):
     def _on_nav_changed(self, current, _previous):
         if current is None:
             return
-        key = current.data(Qt.ItemDataRole.UserRole)
+        key = current.data(0, Qt.ItemDataRole.UserRole)
         if not key:
             return
-        content = _SECTIONS.get(key) or _SECTIONS_LED.get(key)
+        content = self._sections_map.get(key)
         if content:
             html = f"<html><body>{content}</body></html>"
             self._browser.setHtml(html)
             self._browser.verticalScrollBar().setValue(0)
+
+    def _on_anchor_clicked(self, url: QUrl):
+        if url.scheme() == "save_word":
+            case = url.path().strip("/")
+            self._save_word_doc(case)
+
+    def _save_word_doc(self, case: str):
+        from gui.tabs.qy_method_doc import generate_case_method_doc
+        default_name = f"QY_method_{case}.docx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save method document",
+            str(Path.home() / default_name),
+            "Word documents (*.docx);;All files (*)")
+        if not path:
+            return
+        try:
+            out = generate_case_method_doc(case, Path(path))
+            QMessageBox.information(self, "Saved", f"Method document saved:\n{out}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", f"Could not save document:\n{exc}")

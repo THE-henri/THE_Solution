@@ -91,6 +91,8 @@ class SpectraPrefs:
     n_bootstrap:            int   = 2000
     pss_fraction_B:         float = 0.85
     pss_fraction_B_error:   float = 0.02
+    pss_auto_fb:            bool  = False
+    pss_obs_wavelength_nm:  float = 400.0
 
 
 @dataclass

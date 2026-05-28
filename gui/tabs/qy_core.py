@@ -33,7 +33,7 @@ h_ey     = 6.626070e-34   # J s (Eyring)
 # ── CSV loaders ───────────────────────────────────────────────────────────────
 
 def load_spectra_csv(filepath: Path) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Load a Cary 60 multi-scan CSV. Returns list of (wl, ab)."""
+    """Load a Cary 60 multi-scan CSV. Returns list of (wl_sorted, ab) arrays."""
     MIN_VALID = 5
     raw  = pd.read_csv(filepath, header=None)
     data = raw.iloc[2:].reset_index(drop=True)
@@ -41,10 +41,16 @@ def load_spectra_csv(filepath: Path) -> list[tuple[np.ndarray, np.ndarray]]:
     for i in range(0, data.shape[1] - 1, 2):
         wl = pd.to_numeric(data.iloc[:, i],     errors="coerce")
         ab = pd.to_numeric(data.iloc[:, i + 1], errors="coerce")
-        valid = wl.notna() & ab.notna()
+        # keep only finite values within the UV-Vis instrument range
+        valid = (wl.notna() & ab.notna()
+                 & wl.between(190, 1100)
+                 & np.isfinite(ab.values))
         if valid.sum() < MIN_VALID:
             continue
-        scans.append((wl[valid].values, ab[valid].values))
+        wl_v = wl[valid].values
+        ab_v = ab[valid].values
+        order = np.argsort(wl_v)
+        scans.append((wl_v[order], ab_v[order]))
     return scans
 
 
@@ -432,15 +438,23 @@ class QYParams:
     auto_detect_min_consec: int   = 3
 
     # ── Initial conditions ───────────────────────────────────────────────────
-    initial_conc_source:   str            = "absorbance"
-    initial_conc_A_manual: Optional[float] = None
-    initial_conc_B_manual: float           = 0.0
+    initial_conc_source:      str            = "absorbance"
+    initial_conc_A_manual:    Optional[float] = None
+    initial_conc_B_manual:    float           = 0.0
+    # plateau averaging window (used when initial_conc_source == "plateau")
+    initial_plateau_start_s:  Optional[float] = None   # None → start of trace
+    initial_plateau_end_s:    Optional[float] = None   # None → fit start
 
     # ── PSS (A_thermal_PSS) ──────────────────────────────────────────────────
-    # "manual_fraction" | "manual_absorbance"
-    pss_source:               str            = "manual_fraction"
+    # "manual_fraction" | "manual_absorbance" | "plateaus"
+    pss_source:               str            = "plateaus"
     pss_fraction_B_manual:    Optional[float] = None
     pss_A_abs_pss_manual:     Optional[float] = None
+    # Plateau/spectrum selection (used when pss_source == "plateaus")
+    pss_plateaus:         Optional[list]  = None  # kinetic: [(t_start_s, t_end_s), ...]
+    pss_spectrum_indices: Optional[list]  = None  # scanning: [int, ...]
+    pss_mon_wls:          Optional[list]  = None  # scanning: specific λ list for extraction
+    pss_mon_wl_range:     Optional[tuple] = None  # scanning: (λ_lo, λ_hi)
 
     # ── Fitting ──────────────────────────────────────────────────────────────
     QY_AB_init:           float = 0.1
@@ -504,10 +518,70 @@ class QYFileResult:
     QY_slopes_raw:            list[float]    # raw Δabs/Δt slopes per monitoring λ
     n_initial_slopes_pts:     int
     irradiation_wavelength_nm: float
+    # reference fit curves (set when QY_AB_reference is not None)
+    abs_ref_per_wl: Optional[list] = field(default=None)
     # LED diagnostic arrays (set only when photon_flux_source == "led_spectrum")
     led_wl_arr:    Optional[np.ndarray] = field(default=None)
     led_N_arr:     Optional[np.ndarray] = field(default=None)
     led_eps_A_arr: Optional[np.ndarray] = field(default=None)
+    # PSS plateau results (set when case == "A_thermal_PSS" and plateaus used)
+    pss_plateau_results: Optional[list] = field(default=None)
+    scans_raw:           Optional[list] = field(default=None)
+
+
+@dataclass
+class PSSPlateauResult:
+    """One PSS measurement from a single kinetic plateau or scanning spectrum."""
+    idx:          int
+    t_start_s:    float   # kinetic: plateau start; scanning: spectrum timestamp
+    t_end_s:      float   # kinetic: plateau end;   scanning: same as t_start_s
+    spectrum_idx: int     # scanning: spectrum index; -1 for kinetic
+    A_mon_PSS:    float   # mean absorbance at monitoring wavelength
+    n_points:     int
+    QY_AB:        float
+    sigma_QY:     float   # combined uncertainty (flux + k_th)
+
+
+def detect_pss_plateaus(
+    time_s:         np.ndarray,
+    abs_1d:         np.ndarray,
+    n_plateaus:     int   = 1,
+    min_duration_s: float = 10.0,
+) -> list:
+    """
+    Detect n_plateaus flat regions in abs_1d using a sliding-variance approach.
+    Returns [(t_start_s, t_end_s), ...] sorted by time.
+    """
+    n = len(time_s)
+    if n < 6:
+        return []
+    dt = float(np.median(np.diff(time_s)))
+    if dt <= 0:
+        dt = 1.0
+    win = max(5, int(min_duration_s / dt))
+    win = min(win, max(n // max(n_plateaus + 1, 2), 5))
+
+    var = np.full(n, np.inf)
+    for i in range(n - win + 1):
+        seg = abs_1d[i:i + win]
+        var[i] = float(seg.var())
+
+    plateaus = []
+    used = np.zeros(n, dtype=bool)
+    for _ in range(n_plateaus):
+        v = var.copy()
+        v[used] = np.inf
+        idx = int(np.argmin(v))
+        if np.isinf(v[idx]):
+            break
+        t0 = float(time_s[idx])
+        t1 = float(time_s[min(idx + win - 1, n - 1)])
+        plateaus.append((t0, t1))
+        lo = max(0, idx - win)
+        hi = min(n, idx + 2 * win)
+        used[lo:hi] = True
+
+    return sorted(plateaus)
 
 
 # ── Photon flux loading ───────────────────────────────────────────────────────
@@ -714,6 +788,7 @@ def run_qy_file(
     time_s   = None
     abs_data = None
     kin_t2d  = None
+    scans    = None  # raw scan list for scanning mode (used in PSS branch)
 
     if params.data_type == "scanning":
         scans = load_spectra_csv(data_file)
@@ -928,6 +1003,27 @@ def run_qy_file(
         conc_A_0 = A0 / (eps_A_mon[0] * params.path_length_cm)
         conc_B_0 = 0.0
         print(f"  A₀_mon    = {A0:.4f}  →  [A]₀ = {conc_A_0:.4e} mol L⁻¹")
+    elif params.initial_conc_source == "plateau":
+        # Average absorbance over a user-defined pre-irradiation plateau window.
+        # Defaults: start → beginning of trace; end → fit start (or full trace).
+        p_start = params.initial_plateau_start_s
+        p_end   = params.initial_plateau_end_s
+        if p_end is None:
+            p_end = fit_start_eff   # up to (but not including) the fit window
+        plat_mask = np.ones(len(time_s), dtype=bool)
+        if p_start is not None:
+            plat_mask &= (time_s >= p_start)
+        if p_end is not None:
+            plat_mask &= (time_s <= p_end)
+        if plat_mask.sum() == 0:
+            raise ValueError(
+                f"Plateau window [{p_start}, {p_end}] s contains no data points. "
+                "Check the plateau start/end times.")
+        A0 = float((abs_data[plat_mask, 0] + baseline_values[0]).mean())
+        conc_A_0 = A0 / (eps_A_mon[0] * params.path_length_cm)
+        conc_B_0 = 0.0
+        print(f"  A₀_mon (plateau avg, {plat_mask.sum()} pts, "
+              f"t=[{p_start},{p_end}] s) = {A0:.4f}  →  [A]₀ = {conc_A_0:.4e} mol L⁻¹")
     elif params.initial_conc_source == "manual":
         if params.initial_conc_A_manual is None:
             raise ValueError("initial_conc_source = 'manual' but initial_conc_A_manual is None.")
@@ -937,6 +1033,21 @@ def run_qy_file(
     else:
         raise ValueError(f"Unknown initial_conc_source: '{params.initial_conc_source}'")
 
+    # ── Case-specific overrides before fitting ────────────────────────────────
+    # A_only / A_only_thermal: species B transparent at irradiation wavelength
+    if params.case in ("A_only", "A_only_thermal"):
+        eps_B_irr = 0.0
+
+    # A_only / AB_both: no thermal back-reaction (k_th always 0)
+    if params.case in ("A_only", "AB_both"):
+        k_th = 0.0
+
+    # A_only_thermal / AB_thermal: k_th must have been supplied
+    if params.case in ("A_only_thermal", "AB_thermal") and k_th == 0.0:
+        raise ValueError(
+            f"Case '{params.case}' requires k_th > 0. "
+            "Set k_th_source to 'manual' or load from the half-life master CSV.")
+
     # ── Build lmfit params ────────────────────────────────────────────────────
     def make_params():
         p = Parameters()
@@ -945,7 +1056,7 @@ def run_qy_file(
         else:
             p.add("QY_AB", value=params.QY_AB_init,
                   min=params.QY_bounds_lo, max=params.QY_bounds_hi)
-        if params.case == "AB_both":
+        if params.case in ("AB_both", "AB_thermal"):
             if params.QY_unconstrained:
                 p.add("QY_BA", value=params.QY_BA_init)
             else:
@@ -960,6 +1071,135 @@ def run_qy_file(
         if k_th == 0.0:
             raise ValueError("A_thermal_PSS requires k_th > 0.")
 
+        eps_A_mon_0 = float(eps_A_mon[0])
+        if eps_A_mon_0 < 1.0:
+            raise ValueError(
+                f"ε_A at monitoring wavelength ({mon_wls[0]:.1f} nm) is "
+                f"{eps_A_mon_0:.2f} L mol⁻¹ cm⁻¹ — choose a monitoring "
+                "wavelength where A absorbs significantly.")
+        empty_arr = np.array([])
+
+        def _pss_calc_one(A_mon_PSS_val: float):
+            """Return (QY_AB, sigma_flux, sigma_kth) for one PSS absorbance."""
+            A_irr_PSS = (eps_A_irr / eps_A_mon_0) * A_mon_PSS_val
+            conc_B_PSS = max(
+                conc_A_0 - A_mon_PSS_val / (eps_A_mon_0 * params.path_length_cm), 0.0)
+            QY_i = pss_algebraic(k_th, conc_B_PSS, V_L, N_mol_s, A_irr_PSS)
+            sig_f = 0.0
+            if N_std_mol_s > 0:
+                QY_hi = pss_algebraic(k_th, conc_B_PSS, V_L, N_mol_s + N_std_mol_s, A_irr_PSS)
+                QY_lo = pss_algebraic(k_th, conc_B_PSS, V_L, N_mol_s - N_std_mol_s, A_irr_PSS)
+                sig_f = (abs(QY_hi - QY_i) + abs(QY_i - QY_lo)) / 2.0
+            sig_k = (QY_i * k_th_std / k_th) if k_th_std > 0 and k_th > 0 else 0.0
+            return QY_i, sig_f, sig_k
+
+        def _pss_aggregate(plateau_results):
+            QY_vals = np.array([pr.QY_AB for pr in plateau_results])
+            sig_vals = np.array([pr.sigma_QY for pr in plateau_results])
+            n_p = len(QY_vals)
+            QY_mean = float(QY_vals.mean())
+            s_prop = float(np.sqrt(np.sum(sig_vals ** 2))) / n_p
+            s_stat = float(QY_vals.std(ddof=1) / np.sqrt(n_p)) if n_p > 1 else 0.0
+            return QY_mean, float(np.sqrt(s_prop ** 2 + s_stat ** 2)), s_stat, s_prop
+
+        def _pss_return(QY_AB_nom, sigma_total, sigma_stat, plateau_results, method_tag):
+            return QYFileResult(
+                file_name=data_file.name,
+                compound=params.compound_name or data_file.stem,
+                case=params.case, mon_wls=mon_wls,
+                N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
+                k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
+                eps_A_mon=eps_A_mon, eps_B_mon=eps_B_mon,
+                conc_A_0=conc_A_0, V_L=V_L, path_length_cm=params.path_length_cm,
+                temperature_C=params.temperature_C, solvent=params.solvent,
+                QY_AB_per_wl=[QY_AB_nom], QY_BA_per_wl=[0.0],
+                stderr_AB_per_wl=[np.nan], sigma_I0_AB_per_wl=[0.0],
+                sigma_total_per_wl=[sigma_total], r2_per_wl=[np.nan],
+                QY_AB=QY_AB_nom, QY_BA=0.0,
+                QY_AB_sigma_fit=sigma_stat, QY_AB_sigma_total=sigma_total,
+                r2=np.nan, method=method_tag,
+                QY_slopes=[np.nan],
+                time_s=time_s, abs_data=abs_data, abs_fit_per_wl=[],
+                abs_fit_lo_per_wl=[], abs_fit_hi_per_wl=[],
+                residuals_2d=empty_arr.reshape(0, len(mon_wls)),
+                time_s_fit=time_s_fit, fit_mask=fit_mask, t_display_per_wl=[time_s],
+                QY_AB_reference=params.QY_AB_reference,
+                QY_slopes_raw=[np.nan],
+                n_initial_slopes_pts=params.n_initial_slopes_pts,
+                irradiation_wavelength_nm=params.irradiation_wavelength_nm,
+                pss_plateau_results=plateau_results,
+                scans_raw=scans,
+            )
+
+        # ── Plateau-based PSS ─────────────────────────────────────────────────
+        if params.pss_source == "plateaus":
+            plateau_results: list = []
+
+            if params.data_type == "kinetic" and params.pss_plateaus:
+                for i, (t0, t1) in enumerate(params.pss_plateaus):
+                    mask_p = (time_s >= t0) & (time_s <= t1)
+                    if not mask_p.any():
+                        print(f"  PSS plateau #{i+1} [{t0}, {t1}] s: no data, skipped.")
+                        continue
+                    A_mon_PSS = float(abs_data[mask_p, 0].mean()) + baseline_values[0]
+                    n_pts = int(mask_p.sum())
+                    QY_i, sig_f, sig_k = _pss_calc_one(A_mon_PSS)
+                    sig_i = float(np.sqrt(sig_f ** 2 + sig_k ** 2))
+                    plateau_results.append(PSSPlateauResult(
+                        idx=i, t_start_s=t0, t_end_s=t1, spectrum_idx=-1,
+                        A_mon_PSS=A_mon_PSS, n_points=n_pts,
+                        QY_AB=QY_i, sigma_QY=sig_i,
+                    ))
+                    print(f"  PSS plateau #{i+1} [{t0:.1f}–{t1:.1f} s, n={n_pts}]: "
+                          f"A_PSS={A_mon_PSS:.4f}  Φ_AB={QY_i:.5f} ± {sig_i:.5f}")
+
+            elif params.data_type == "scanning" and params.pss_spectrum_indices and scans:
+                for i, spec_idx in enumerate(params.pss_spectrum_indices):
+                    if spec_idx >= len(scans):
+                        print(f"  PSS spectrum #{spec_idx} out of range, skipped.")
+                        continue
+                    wl_arr, ab_arr = scans[spec_idx]
+                    if params.pss_mon_wl_range:
+                        lo, hi = params.pss_mon_wl_range
+                        mask_wl = (wl_arr >= lo) & (wl_arr <= hi)
+                        A_mon_PSS = float(ab_arr[mask_wl].mean()) if mask_wl.any() else np.nan
+                    elif params.pss_mon_wls:
+                        vals = [extract_absorbance(wl_arr, ab_arr, wl,
+                                                   params.wavelength_tolerance_nm)
+                                for wl in params.pss_mon_wls]
+                        A_mon_PSS = float(np.nanmean(vals))
+                    else:
+                        A_mon_PSS = extract_absorbance(
+                            wl_arr, ab_arr, mon_wls[0], params.wavelength_tolerance_nm)
+                    if np.isnan(A_mon_PSS):
+                        print(f"  PSS spectrum #{spec_idx}: NaN absorbance, skipped.")
+                        continue
+                    t_spec = float(spec_idx * params.delta_t_s * params.scans_per_group)
+                    QY_i, sig_f, sig_k = _pss_calc_one(A_mon_PSS)
+                    sig_i = float(np.sqrt(sig_f ** 2 + sig_k ** 2))
+                    plateau_results.append(PSSPlateauResult(
+                        idx=i, t_start_s=t_spec, t_end_s=t_spec, spectrum_idx=spec_idx,
+                        A_mon_PSS=A_mon_PSS, n_points=1,
+                        QY_AB=QY_i, sigma_QY=sig_i,
+                    ))
+                    print(f"  PSS spectrum #{spec_idx} (t={t_spec:.0f} s): "
+                          f"A_PSS={A_mon_PSS:.4f}  Φ_AB={QY_i:.5f} ± {sig_i:.5f}")
+
+            else:
+                raise ValueError(
+                    "PSS case 'plateaus' selected but no pss_plateaus / pss_spectrum_indices "
+                    "provided. Either set them or switch to 'manual_fraction'.")
+
+            if not plateau_results:
+                raise ValueError("No valid PSS plateaus/spectra found. Check time ranges.")
+
+            QY_AB_nom, sigma_total, sigma_stat, _ = _pss_aggregate(plateau_results)
+            print(f"  PSS mean: Φ_AB = {QY_AB_nom:.5f} ± {sigma_total:.5f} "
+                  f"(n={len(plateau_results)})")
+            return _pss_return(QY_AB_nom, sigma_total, sigma_stat,
+                               plateau_results, "PSS_plateau")
+
+        # ── Manual PSS (legacy) ───────────────────────────────────────────────
         A0_irr = conc_A_0 * eps_A_irr * params.path_length_cm
         if params.pss_source == "manual_fraction":
             f_B = params.pss_fraction_B_manual
@@ -976,43 +1216,15 @@ def run_qy_file(
             raise ValueError(f"Unknown pss_source: '{params.pss_source}'")
 
         QY_AB_nom = pss_algebraic(k_th, pss_B_conc, V_L, N_mol_s, pss_A_abs_val)
-        # I₀ perturbation
         sigma_I0_AB = 0.0
         if N_std_mol_s > 0:
             QY_hi = pss_algebraic(k_th, pss_B_conc, V_L, N_mol_s + N_std_mol_s, pss_A_abs_val)
             QY_lo = pss_algebraic(k_th, pss_B_conc, V_L, N_mol_s - N_std_mol_s, pss_A_abs_val)
             sigma_I0_AB = (abs(QY_hi - QY_AB_nom) + abs(QY_AB_nom - QY_lo)) / 2.0
         sigma_kth_AB = QY_AB_nom * (k_th_std / k_th) if k_th_std > 0 and k_th > 0 else 0.0
-        sigma_total = np.sqrt(sigma_I0_AB**2 + sigma_kth_AB**2)
-        print(f"  Φ_AB (PSS algebraic) = {QY_AB_nom:.5f} ± {sigma_total:.5f}")
-
-        # Minimal plot arrays (no time-series fit)
-        empty_arr = np.array([])
-        return QYFileResult(
-            file_name=data_file.name,
-            compound=params.compound_name or data_file.stem,
-            case=params.case, mon_wls=mon_wls,
-            N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
-            k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=eps_B_irr,
-            eps_A_mon=eps_A_mon, eps_B_mon=eps_B_mon,
-            conc_A_0=conc_A_0, V_L=V_L, path_length_cm=params.path_length_cm,
-            temperature_C=params.temperature_C, solvent=params.solvent,
-            QY_AB_per_wl=[QY_AB_nom], QY_BA_per_wl=[0.0],
-            stderr_AB_per_wl=[np.nan], sigma_I0_AB_per_wl=[sigma_I0_AB],
-            sigma_total_per_wl=[sigma_total], r2_per_wl=[np.nan],
-            QY_AB=QY_AB_nom, QY_BA=0.0,
-            QY_AB_sigma_fit=np.nan, QY_AB_sigma_total=sigma_total,
-            r2=np.nan, method="PSS_algebraic",
-            QY_slopes=[np.nan],
-            time_s=time_s, abs_data=abs_data, abs_fit_per_wl=[],
-            abs_fit_lo_per_wl=[], abs_fit_hi_per_wl=[],
-            residuals_2d=empty_arr.reshape(0, len(mon_wls)),
-            time_s_fit=time_s_fit, fit_mask=fit_mask, t_display_per_wl=[time_s],
-            QY_AB_reference=params.QY_AB_reference,
-            QY_slopes_raw=[np.nan],
-            n_initial_slopes_pts=params.n_initial_slopes_pts,
-            irradiation_wavelength_nm=params.irradiation_wavelength_nm,
-        )
+        sigma_total = np.sqrt(sigma_I0_AB ** 2 + sigma_kth_AB ** 2)
+        print(f"  Φ_AB (PSS manual) = {QY_AB_nom:.5f} ± {sigma_total:.5f}")
+        return _pss_return(QY_AB_nom, float(sigma_total), 0.0, None, "PSS_algebraic")
 
     # ── ODE fitting (A_only or AB_both) ──────────────────────────────────────
     n_mon = len(mon_wls)
@@ -1081,11 +1293,14 @@ def run_qy_file(
               f"σ_total={st_j:.5f} R²={r2_j:.5f}")
 
     QY_AB_nom       = float(np.nanmean(QY_AB_per_wl))
-    QY_BA_nom       = float(np.nanmean(QY_BA_per_wl)) if params.case == "AB_both" else 0.0
+    QY_BA_nom       = (float(np.nanmean(QY_BA_per_wl))
+                       if params.case in ("AB_both", "AB_thermal") else 0.0)
     stderr_AB_mean  = float(np.nanmean(stderr_AB_per_wl))
     sigma_total_AB  = float(np.nanmean(sigma_total_per_wl))
     r2_mean         = float(np.nanmean(r2_per_wl))
-    method = ("ODE_lmfit_LED_full" if use_led_full else "ODE_lmfit")
+    _case_tag = params.case
+    method = (f"ODE_lmfit_LED_full_{_case_tag}" if use_led_full
+              else f"ODE_lmfit_{_case_tag}")
 
     # ── Initial slopes ────────────────────────────────────────────────────────
     if params.compute_initial_slopes:
@@ -1149,6 +1364,15 @@ def run_qy_file(
         td_abs = kin_t2d[disp_mask, j] if kin_t2d is not None else time_disp
         t_display_per_wl.append(td_abs)
 
+    # Reference curves (simulated with QY_AB_reference, fitted QY_BA)
+    abs_ref_per_wl = None
+    if params.QY_AB_reference is not None:
+        p_ref = make_params()
+        p_ref["QY_AB"].set(value=params.QY_AB_reference, vary=False)
+        if params.case == "AB_both":
+            p_ref["QY_BA"].set(value=QY_BA_nom, vary=False)
+        abs_ref_per_wl = [sim_curve(p_ref, t_disp_ode(j), j) for j in range(n_mon)]
+
     # Residuals
     residuals_2d = np.column_stack([
         abs_fit_per_wl[j][fit_in_disp] - abs_data_fit[:, j]
@@ -1184,13 +1408,310 @@ def run_qy_file(
         QY_slopes_raw=slopes_raw,
         n_initial_slopes_pts=params.n_initial_slopes_pts,
         irradiation_wavelength_nm=params.irradiation_wavelength_nm,
+        abs_ref_per_wl=abs_ref_per_wl,
         led_wl_arr=led_wl_arr if led_wl_arr is not None else None,
         led_N_arr=led_N_arr if led_N_arr is not None else None,
         led_eps_A_arr=led_eps_A_arr if use_led_full else None,
     )
 
 
+# ── Case equation strings ─────────────────────────────────────────────────────
+
+def _case_equation_string(case: str) -> str:
+    """One-line ODE equation shown in legend / annotation for each case."""
+    if case == "A_only":
+        return "d[A]/dt = −(N/V)·l·F(t)·ε_A·Φ_AB·[A]"
+    if case == "A_only_thermal":
+        return "d[A]/dt = −(N/V)·l·F(t)·ε_A·Φ_AB·[A] + k_th·[B]"
+    if case == "AB_both":
+        return "d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B] − ε_A·Φ_AB·[A])"
+    if case == "AB_thermal":
+        return ("d[A]/dt = (N/V)·l·F(t)·(ε_B·Φ_BA·[B]"
+                " − ε_A·Φ_AB·[A]) + k_th·[B]")
+    if case == "A_thermal_PSS":
+        return "Φ_AB = k_th·[B]_PSS·V / (N·(1−10^⁻A_PSS))"
+    return ""
+
+
+# ── Exact linearized QY (A_only case only) ────────────────────────────────────
+
+def run_qy_linearized(
+    params:      QYParams,
+    data_file:   Path,
+    N_mol_s:     float,
+    N_std_mol_s: float,
+    eps_A_irr:   float,
+    eps_A_mon:   float,
+    k_th:        float = 0.0,
+) -> "QYFileResult":
+    """
+    Exact analytical quantum yield via the Parker linearisation.
+
+    For the A_only case (eps_B_irr = 0, QY_BA = 0, k_th = 0) the ODE separates
+    exactly.  Defining A_irr(t) = (eps_A_irr / eps_A_mon) * A_mon(t):
+
+        log10(10^A_irr(t) - 1) - log10(10^A_irr(0) - 1)
+            = -(N * eps_A_irr * l / V) * Phi_AB * t
+
+    The left-hand side is linear in t; the slope gives Phi_AB directly.
+    """
+    V_L  = params.volume_mL / 1000.0
+    l_cm = params.path_length_cm
+
+    # Load and baseline-correct the same way as run_qy_file ───────────────────
+    if params.data_type == "kinetic":
+        channels = load_kinetic_csv(data_file)
+        if not channels:
+            raise ValueError(f"No channels loaded from {data_file.name}.")
+        ch_items = list(channels.items())
+        min_len  = min(len(t) for (_, (t, _)) in ch_items)
+        t_arr    = ch_items[0][1][0][:min_len]
+        a_arr    = ch_items[0][1][1][:min_len]
+    elif params.data_type == "scanning":
+        scans = load_spectra_csv(data_file)
+        n_groups = len(scans) // params.scans_per_group
+        t_arr    = np.arange(n_groups, dtype=float) * params.delta_t_s
+        mon_wls  = ([float(w) for w in params.monitoring_wavelengths]
+                    if params.monitoring_wavelengths else [scans[0][0].mean()])
+        a_arr    = np.array([
+            extract_absorbance(scans[g * params.scans_per_group][0],
+                               scans[g * params.scans_per_group][1],
+                               mon_wls[0], params.wavelength_tolerance_nm)
+            for g in range(n_groups)])
+    else:
+        raise ValueError(f"Unknown data_type: '{params.data_type}'")
+
+    # Baseline correction (first-point only for linearized)
+    a_arr = a_arr - a_arr[0]
+
+    valid = ~np.isnan(a_arr)
+    t_arr = t_arr[valid]; a_arr = a_arr[valid]
+    if len(t_arr) < 3:
+        raise ValueError("Fewer than 3 valid time points.")
+
+    # Fit window ─────────────────────────────────────────────────────────────
+    fit_start = params.fit_time_start_s
+    fit_end   = params.fit_time_end_s
+    if params.auto_detect_irr_start:
+        abs_2d = a_arr[:, np.newaxis]
+        t_fit_s, _, _, _, _, _ = detect_irr_start(
+            t_arr, abs_2d,
+            params.auto_detect_n_plateau,
+            params.auto_detect_threshold,
+            params.auto_detect_min_consec)
+        if t_fit_s is not None:
+            fit_start = t_fit_s
+    mask = np.ones(len(t_arr), dtype=bool)
+    if fit_start is not None:
+        mask &= (t_arr >= fit_start)
+    if fit_end is not None:
+        mask &= (t_arr <= fit_end)
+    t_fit = t_arr[mask]; a_fit = a_arr[mask]
+    if len(t_fit) < 3:
+        raise ValueError("Fewer than 3 points in fit window.")
+
+    # Add back baseline offset to get absolute absorbance for A_irr conversion
+    # (baseline was already subtracted; reconstruct from eps_A_mon and conc)
+    # For the linearization we need the absolute absorbance value A_mon > 0.
+    # We derive A0 from the first fit-window point + estimated initial abs.
+    # Because baseline = subtract_first_point, abs values are relative to t=0.
+    # Restore: A_mon_abs(t) = a_arr(t) + A0_kinetic_t0
+    # A0_kinetic_t0 is derived from conc_A_0 * eps_A_mon * l
+    # but we don't know conc_A_0 before fitting — use the first fit point raw
+    # value from the original (pre-subtracted) trace.
+    # Simpler: just work with a_fit directly if the user aligned to a spectrum;
+    # otherwise ask the user to use align_to_spectrum for best results.
+    # Here we use the corrected trace as-is (relative absorbance).
+    # The linearization is still valid if A0_irr can be read off the trace.
+    # We estimate A0_mon from the first fit point before baseline subtraction;
+    # for subtract_first_point mode A_mon(0) = eps_A_mon*[A]0*l at t=fit_start.
+    # The ratio eps_A_irr/eps_A_mon converts to A_irr.
+    ratio = eps_A_irr / max(eps_A_mon, 1e-3)
+    A_irr = ratio * a_fit
+
+    # Filter: A_irr must be > 0 for log10 to be defined
+    valid2 = A_irr > 1e-6
+    if valid2.sum() < 3:
+        raise ValueError(
+            "Too few A_irr > 0 points for linearization. "
+            "Check ε_A values and baseline correction.")
+    t_lin   = t_fit[valid2] - t_fit[valid2][0]
+    A_irr_v = A_irr[valid2]
+    y       = np.log10(10.0 ** A_irr_v - 1.0)
+
+    # Linear fit: y = y0 + slope * t
+    coeffs  = np.polyfit(t_lin, y, 1)
+    slope   = coeffs[0]      # negative
+    y0_fit  = coeffs[1]
+
+    # Φ_AB from slope
+    QY_AB_nom = abs(slope) * V_L / (N_mol_s * eps_A_irr * l_cm)
+
+    # σ from fit + photon flux uncertainty
+    y_pred    = np.polyval(coeffs, t_lin)
+    ss_res    = float(np.sum((y - y_pred) ** 2))
+    ss_tot    = float(np.sum((y - y.mean()) ** 2))
+    r2        = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    n_pts     = len(t_lin)
+    se_slope  = (np.sqrt(ss_res / max(n_pts - 2, 1))
+                 / np.sqrt(float(np.sum((t_lin - t_lin.mean()) ** 2)))
+                 if n_pts > 2 else np.nan)
+    se_QY     = se_slope * V_L / (N_mol_s * eps_A_irr * l_cm) if not np.isnan(se_slope) else np.nan
+
+    sigma_I0 = 0.0
+    if N_std_mol_s > 0:
+        QY_hi = abs(slope) * V_L / ((N_mol_s + N_std_mol_s) * eps_A_irr * l_cm)
+        QY_lo = abs(slope) * V_L / ((N_mol_s - N_std_mol_s) * eps_A_irr * l_cm)
+        sigma_I0 = (abs(QY_hi - QY_AB_nom) + abs(QY_AB_nom - QY_lo)) / 2.0
+    sigma_total = np.sqrt((se_QY if not np.isnan(se_QY) else 0.0) ** 2 + sigma_I0 ** 2)
+
+    print(f"  Exact linearized: slope={slope:.6e}  "
+          f"Φ_AB={QY_AB_nom:.5f} ± {sigma_total:.5f}  R²={r2:.5f}")
+
+    # Reconstruct fitted absorbance from the line ────────────────────────────
+    t_disp  = t_arr[t_arr >= (t_fit[valid2][0] + (fit_start or 0.0))]
+    t_disp  = t_arr[t_arr >= t_fit[0]]
+    t_d_ode = t_disp - t_fit[valid2][0]
+    y_fit_d = y0_fit + slope * t_d_ode
+    # invert: A_irr_fit = log10(10^y + 1)
+    A_irr_fit = np.log10(10.0 ** y_fit_d + 1.0)
+    A_mon_fit = A_irr_fit / ratio
+
+    # Confidence band from slope ± se_slope
+    sigma_b = se_slope if not np.isnan(se_slope) else 0.0
+    y_lo_d  = y0_fit + (slope + sigma_b) * t_d_ode
+    y_hi_d  = y0_fit + (slope - sigma_b) * t_d_ode
+    A_irr_lo = np.log10(np.clip(10.0 ** y_lo_d + 1.0, 1e-10, None))
+    A_irr_hi = np.log10(np.clip(10.0 ** y_hi_d + 1.0, 1e-10, None))
+
+    # Residuals (fit vs measured, on fit window)
+    A_irr_fit_at_fit = np.log10(10.0 ** (y0_fit + slope * t_lin) + 1.0)
+    A_mon_fit_at_fit = A_irr_fit_at_fit / ratio
+    residuals_2d = (A_mon_fit_at_fit - a_fit[valid2]).reshape(-1, 1)
+
+    mon_wls = ([float(w) for w in params.monitoring_wavelengths]
+               if params.monitoring_wavelengths else [np.nan])
+
+    return QYFileResult(
+        file_name=data_file.name,
+        compound=params.compound_name or data_file.stem,
+        case=params.case, mon_wls=mon_wls[:1],
+        N_mol_s=N_mol_s, N_std_mol_s=N_std_mol_s,
+        k_th=k_th, eps_A_irr=eps_A_irr, eps_B_irr=0.0,
+        eps_A_mon=np.array([eps_A_mon]),
+        eps_B_mon=np.array([0.0]),
+        conc_A_0=float(a_fit[valid2][0] / (eps_A_mon * l_cm))
+                 if eps_A_mon > 0 else np.nan,
+        V_L=V_L, path_length_cm=l_cm,
+        temperature_C=params.temperature_C, solvent=params.solvent,
+        QY_AB_per_wl=[QY_AB_nom], QY_BA_per_wl=[0.0],
+        stderr_AB_per_wl=[se_QY],
+        sigma_I0_AB_per_wl=[sigma_I0],
+        sigma_total_per_wl=[sigma_total],
+        r2_per_wl=[r2],
+        QY_AB=QY_AB_nom, QY_BA=0.0,
+        QY_AB_sigma_fit=se_QY if not np.isnan(se_QY) else 0.0,
+        QY_AB_sigma_total=sigma_total,
+        r2=r2, method="exact_linearized_A_only",
+        QY_slopes=[np.nan],
+        time_s=t_arr, abs_data=a_arr[:, np.newaxis],
+        abs_fit_per_wl=[A_mon_fit],
+        abs_fit_lo_per_wl=[A_irr_lo / ratio],
+        abs_fit_hi_per_wl=[A_irr_hi / ratio],
+        residuals_2d=residuals_2d,
+        time_s_fit=t_fit[valid2], fit_mask=mask,
+        t_display_per_wl=[t_disp],
+        QY_AB_reference=params.QY_AB_reference,
+        QY_slopes_raw=[np.nan],
+        n_initial_slopes_pts=params.n_initial_slopes_pts,
+        irradiation_wavelength_nm=params.irradiation_wavelength_nm,
+    )
+
+
 # ── Plot ──────────────────────────────────────────────────────────────────────
+
+def plot_pss_kinetic(
+    time_s:          np.ndarray,
+    abs_data:        np.ndarray,
+    mon_wl:          float,
+    plateau_results: list,
+    compound:        str = "",
+    file_name:       str = "",
+) -> Figure:
+    """
+    Kinetic trace with shaded plateau windows annotated with per-plateau Φ_AB.
+    """
+    colors = plt.cm.plasma(np.linspace(0.15, 0.85, max(len(plateau_results), 1)))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(time_s, abs_data[:, 0], color="#4a9eff", lw=1.4, zorder=2, label="Data")
+    for pr, col in zip(plateau_results, colors):
+        ax.axvspan(pr.t_start_s, pr.t_end_s, alpha=0.22, color=col, zorder=1)
+        ax.axhline(pr.A_mon_PSS, color=col, lw=0.9, ls="--", alpha=0.7)
+        mid_t = (pr.t_start_s + pr.t_end_s) / 2.0
+        y_ann = pr.A_mon_PSS
+        ax.annotate(
+            f"#{pr.idx + 1}  Φ={pr.QY_AB:.4f}\nA={pr.A_mon_PSS:.4f}",
+            xy=(mid_t, y_ann), xytext=(0, 8),
+            textcoords="offset points",
+            ha="center", fontsize=7.5, color=col,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor=col),
+        )
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(f"Absorbance at {mon_wl:.0f} nm")
+    ax.set_title(f"PSS Plateau Analysis — {compound}  |  {file_name}")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pss_scanning(
+    scans:             list,
+    selected_indices:  list,
+    mon_wls:           list,
+    pss_mon_wls:       "list | None" = None,
+    pss_mon_wl_range:  "tuple | None" = None,
+    compound:          str = "",
+    file_name:         str = "",
+    delta_t_s:         float = 1.0,
+) -> Figure:
+    """
+    All spectra in grey, PSS spectra highlighted, extraction wavelength marked.
+    """
+    fig, ax = plt.subplots(figsize=(8, 4))
+    n = len(scans)
+    c_grey = np.linspace(0.25, 0.65, max(n, 1))
+    sel_set = set(selected_indices or [])
+    for i, (wl, ab) in enumerate(scans):
+        if i not in sel_set:
+            ax.plot(wl, ab, color=str(c_grey[i]), lw=0.5, alpha=0.4)
+    if selected_indices:
+        colors = plt.cm.plasma(np.linspace(0.15, 0.85, max(len(selected_indices), 1)))
+        for j, idx in enumerate(sorted(selected_indices)):
+            if idx < len(scans):
+                wl, ab = scans[idx]
+                t_lbl = f"#{idx} (t={idx * delta_t_s:.0f} s)"
+                ax.plot(wl, ab, color=colors[j], lw=1.6, label=t_lbl, zorder=3)
+    if pss_mon_wls:
+        for wl_m in pss_mon_wls:
+            ax.axvline(wl_m, color="#ff4444", lw=1.0, ls="--", alpha=0.8,
+                       label=f"λ={wl_m:.0f} nm")
+    elif pss_mon_wl_range:
+        ax.axvspan(pss_mon_wl_range[0], pss_mon_wl_range[1],
+                   alpha=0.18, color="#ff4444", label="Extraction range")
+    else:
+        for wl_m in (mon_wls or []):
+            ax.axvline(wl_m, color="#ff4444", lw=1.0, ls="--", alpha=0.8,
+                       label=f"mon λ={wl_m:.0f} nm")
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Absorbance")
+    ax.set_title(f"PSS Spectrum Selection — {compound}  |  {file_name}")
+    if selected_indices:
+        ax.legend(fontsize=7, loc="upper right", ncol=min(len(selected_indices), 4))
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    return fig
+
 
 def plot_qy_result(result: QYFileResult) -> Figure:
     """Main result plot: absorbance per wavelength + residuals + concentrations."""
@@ -1240,6 +1761,11 @@ def plot_qy_result(result: QYFileResult) -> Figure:
                             result.abs_fit_lo_per_wl[j],
                             result.abs_fit_hi_per_wl[j],
                             color="#e67e22", alpha=0.30, label="±σ_total")
+        if (result.abs_ref_per_wl is not None
+                and j < len(result.abs_ref_per_wl)):
+            ax.plot(td_j, result.abs_ref_per_wl[j], "-.", color="green",
+                    linewidth=1.4,
+                    label=f"Ref  Φ_AB={result.QY_AB_reference:.4f}")
         # Initial slope tangent
         if (result.QY_slopes_raw and j < len(result.QY_slopes_raw)
                 and not np.isnan(result.QY_slopes_raw[j])
@@ -1258,7 +1784,12 @@ def plot_qy_result(result: QYFileResult) -> Figure:
         ax.grid(True, alpha=0.4)
 
     # Annotation
-    lines = []
+    lines = [_case_equation_string(result.case),
+             f"N = {result.N_mol_s:.4e} mol s⁻¹",
+             f"ε_A_irr = {result.eps_A_irr:.4e} M⁻¹cm⁻¹"]
+    if result.k_th > 0:
+        lines.append(f"k_th = {result.k_th:.4e} s⁻¹")
+    lines.append("")
     for j, wl_nm in enumerate(result.mon_wls):
         lines.append(
             f"λ={wl_nm:.0f} nm: Φ_AB={result.QY_AB_per_wl[j]:.4f}  "
@@ -1461,4 +1992,205 @@ def plot_qy_led_diagnostic(
     fig.suptitle(
         f"LED Spectral Diagnostic — {result.compound}  |  {result.file_name}",
         fontsize=10)
+    return fig
+
+
+# ── QY master CSV helpers ─────────────────────────────────────────────────────
+
+def _irr_type_from_result(r: QYFileResult) -> str:
+    if "LED_full" in r.method:
+        return "LED (full)"
+    if "LED" in r.method:
+        return "LED (scalar)"
+    return "Monochromatic"
+
+
+def build_qy_master_row(r: QYFileResult, j: int) -> dict:
+    """Build one master CSV row for monitoring wavelength index j."""
+    wl = r.mon_wls[j]
+    return {
+        "File":           r.file_name,
+        "Compound":       r.compound,
+        "Case":           r.case,
+        "Irr_type":       _irr_type_from_result(r),
+        "Irr_wl_nm":      r.irradiation_wavelength_nm,
+        "Mon_wl_nm":      wl,
+        "Temperature_C":  r.temperature_C,
+        "Solvent":        r.solvent,
+        "QY_AB":          r.QY_AB_per_wl[j] if j < len(r.QY_AB_per_wl) else r.QY_AB,
+        "sigma_total_AB": r.sigma_total_per_wl[j] if j < len(r.sigma_total_per_wl) else r.QY_AB_sigma_total,
+        "QY_BA":          r.QY_BA_per_wl[j] if j < len(r.QY_BA_per_wl) else r.QY_BA,
+        "R2":             r.r2_per_wl[j] if j < len(r.r2_per_wl) else r.r2,
+        "Method":         r.method,
+    }
+
+
+def build_qy_detail_df(r: QYFileResult) -> pd.DataFrame:
+    """
+    Return a DataFrame with the full kinetic data for one result:
+    time, raw absorbance, fitted absorbance, residuals, and derived
+    concentrations — all per monitoring wavelength.
+
+    Parameter metadata is stored in the DataFrame's ``attrs`` dict under
+    the key ``"header_lines"`` (a list of ``# key: value`` strings suitable
+    for prepending to a CSV).
+    """
+    n = len(r.time_s)
+    cols: dict[str, np.ndarray] = {"Time_s": r.time_s}
+
+    # Raw absorbance
+    for j, wl in enumerate(r.mon_wls):
+        cols[f"Abs_{wl:.0f}nm"] = r.abs_data[:, j]
+
+    # Fitted absorbance (interpolated onto full time axis)
+    for j, wl in enumerate(r.mon_wls):
+        if j < len(r.abs_fit_per_wl):
+            td = r.t_display_per_wl[j] if r.t_display_per_wl else r.time_s_fit
+            cols[f"Fit_{wl:.0f}nm"] = np.interp(
+                r.time_s, td, r.abs_fit_per_wl[j], left=np.nan, right=np.nan)
+
+    # Residuals (fit – measured, on fit window; NaN elsewhere)
+    for j, wl in enumerate(r.mon_wls):
+        res_col = np.full(n, np.nan)
+        if r.residuals_2d.size > 0 and j < r.residuals_2d.shape[1]:
+            fit_idx = np.where(r.fit_mask)[0]
+            if len(fit_idx) == r.residuals_2d.shape[0]:
+                res_col[fit_idx] = r.residuals_2d[:, j]
+        cols[f"Residual_{wl:.0f}nm"] = res_col
+
+    # Concentrations [A] and [B] recovered from Beer–Lambert
+    l = r.path_length_cm
+    for j, wl in enumerate(r.mon_wls):
+        eA = float(r.eps_A_mon[j])
+        eB = float(r.eps_B_mon[j])
+        A_meas = r.abs_data[:, j]
+        if abs(eA - eB) > 1e-6 * max(abs(eA), abs(eB), 1.0):
+            cA = (A_meas / l - eB * r.conc_A_0) / (eA - eB)
+        else:
+            cA = A_meas / (max(eA, 1.0) * l)
+        cB = r.conc_A_0 - cA
+        cols[f"ConcA_{wl:.0f}nm_molL"] = cA
+        cols[f"ConcB_{wl:.0f}nm_molL"] = cB
+
+    df = pd.DataFrame(cols)
+
+    # Fit-window start/end as metadata
+    t_start = float(r.time_s_fit[0])  if r.time_s_fit.size  > 0 else np.nan
+    t_end   = float(r.time_s_fit[-1]) if r.time_s_fit.size  > 0 else np.nan
+
+    header: list[str] = [
+        f"# File             : {r.file_name}",
+        f"# Compound         : {r.compound}",
+        f"# Case             : {r.case}",
+        f"# Method           : {r.method}",
+        f"# ODE_equation     : {_case_equation_string(r.case)}",
+        f"# Temperature_C    : {r.temperature_C}",
+        f"# Solvent          : {r.solvent}",
+        f"# Fit_start_s      : {t_start:.3f}",
+        f"# Fit_end_s        : {t_end:.3f}",
+        f"# N_mol_s          : {r.N_mol_s:.6e}",
+        f"# N_std_mol_s      : {r.N_std_mol_s:.6e}",
+        f"# eps_A_irr        : {r.eps_A_irr:.4e}",
+        f"# eps_B_irr        : {r.eps_B_irr:.4e}",
+        f"# k_th_s           : {r.k_th:.6e}",
+        f"# path_length_cm   : {r.path_length_cm}",
+        f"# volume_mL        : {r.V_L * 1000:.3f}",
+        f"# conc_A_0_molL    : {r.conc_A_0:.6e}",
+        f"# Phi_AB           : {r.QY_AB:.6f}",
+        f"# sigma_total_AB   : {r.QY_AB_sigma_total:.6f}",
+        f"# R2_mean          : {r.r2:.6f}",
+        f"# Irr_wl_nm        : {r.irradiation_wavelength_nm:.1f}",
+    ]
+    for j, wl in enumerate(r.mon_wls):
+        qy_j = r.QY_AB_per_wl[j] if j < len(r.QY_AB_per_wl) else r.QY_AB
+        st_j = r.sigma_total_per_wl[j] if j < len(r.sigma_total_per_wl) else r.QY_AB_sigma_total
+        r2_j = r.r2_per_wl[j] if j < len(r.r2_per_wl) else r.r2
+        header.append(
+            f"# Phi_AB_{wl:.0f}nm     : {qy_j:.6f}"
+            f"  sigma={st_j:.6f}  R2={r2_j:.6f}")
+
+    # PSS plateau metadata (appended when plateau results are available)
+    if r.pss_plateau_results:
+        header.append(f"# PSS_n_plateaus    : {len(r.pss_plateau_results)}")
+        for pr in r.pss_plateau_results:
+            prefix = f"# PSS_p{pr.idx + 1}"
+            if pr.spectrum_idx >= 0:
+                header.append(f"{prefix}_spectrum_idx  : {pr.spectrum_idx}")
+            else:
+                header.append(f"{prefix}_t_start_s     : {pr.t_start_s:.3f}")
+                header.append(f"{prefix}_t_end_s       : {pr.t_end_s:.3f}")
+            header.append(f"{prefix}_A_mon_PSS     : {pr.A_mon_PSS:.6f}")
+            header.append(f"{prefix}_n_points      : {pr.n_points}")
+            header.append(f"{prefix}_QY_AB         : {pr.QY_AB:.6f}")
+            header.append(f"{prefix}_sigma_QY      : {pr.sigma_QY:.6f}")
+
+    df.attrs["header_lines"] = header
+    return df
+
+
+# ── Publication plot ──────────────────────────────────────────────────────────
+
+def plot_qy_publication(results: list) -> Figure:
+    """
+    Bar chart of Φ_AB per (file, monitoring wavelength) with σ_total error bars.
+    A dashed reference line is shown if any result carries QY_AB_reference.
+    """
+    if not results:
+        fig = Figure(figsize=(5, 4))
+        ax  = fig.add_subplot(111)
+        ax.text(0.5, 0.5, "No results to display",
+                ha="center", va="center", transform=ax.transAxes, fontsize=11)
+        return fig
+
+    # Colour palette indexed by compound name
+    compounds = list(dict.fromkeys(r.compound for r in results))
+    cmap      = plt.cm.tab10
+    comp_clr  = {c: cmap(i % 10) for i, c in enumerate(compounds)}
+
+    labels, qy_vals, qy_errs, colors = [], [], [], []
+    ref_val = None
+
+    for r in results:
+        if r.QY_AB_reference is not None:
+            ref_val = r.QY_AB_reference
+        for j, wl in enumerate(r.mon_wls):
+            qy_ab = r.QY_AB_per_wl[j] if j < len(r.QY_AB_per_wl) else r.QY_AB
+            st    = r.sigma_total_per_wl[j] if j < len(r.sigma_total_per_wl) else r.QY_AB_sigma_total
+            if len(r.mon_wls) > 1:
+                label = f"{r.compound}\n{wl:.0f} nm"
+            else:
+                label = r.compound
+            labels.append(label)
+            qy_vals.append(float(qy_ab))
+            qy_errs.append(float(st))
+            colors.append(comp_clr[r.compound])
+
+    n     = len(labels)
+    x     = np.arange(n)
+    figw  = max(5, n * 0.9 + 2)
+    fig   = Figure(figsize=(figw, 5), constrained_layout=True)
+    ax    = fig.add_subplot(111)
+
+    bars = ax.bar(x, qy_vals, 0.6, yerr=qy_errs,
+                  color=colors, alpha=0.8, capsize=5,
+                  error_kw={"linewidth": 1.5, "ecolor": "black"})
+
+    if ref_val is not None:
+        ax.axhline(ref_val, color="green", linewidth=1.5, linestyle="--",
+                   label=f"Ref Φ_AB = {ref_val:.4f}")
+        ax.legend(fontsize=9)
+
+    # Value labels above each bar
+    y_max = max((v + e for v, e in zip(qy_vals, qy_errs)), default=1.0)
+    for bar, val in zip(bars, qy_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + y_max * 0.015,
+                f"{val:.4f}", ha="center", va="bottom", fontsize=7)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Quantum yield Φ_AB")
+    ax.set_title("Quantum yield summary")
+    ax.set_ylim(bottom=0, top=y_max * 1.18)
+    ax.grid(True, axis="y", alpha=0.35)
     return fig

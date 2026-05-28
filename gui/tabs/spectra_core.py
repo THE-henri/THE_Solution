@@ -44,6 +44,31 @@ def load_spectra_csv(filepath: Path) -> list[tuple[np.ndarray, np.ndarray]]:
     return scans
 
 
+def scan_labels_for_file(filepath: Path) -> list[str]:
+    """
+    Read scan labels from the Cary 60 CSV header row (row 0, even columns).
+    Returns one label per valid scan, matching the order of load_spectra_csv.
+    """
+    MIN_VALID = 5
+    _skip = {"", "nan", "wavelength (nm)", "wavelength", "nm"}
+    raw  = pd.read_csv(filepath, header=None)
+    data = raw.iloc[2:].reset_index(drop=True)
+    labels = []
+    scan_n = 0
+    for i in range(0, data.shape[1] - 1, 2):
+        wl = pd.to_numeric(data.iloc[:, i],     errors="coerce")
+        ab = pd.to_numeric(data.iloc[:, i + 1], errors="coerce")
+        if (wl.notna() & ab.notna()).sum() < MIN_VALID:
+            continue
+        try:
+            lv = str(raw.iloc[0, i]).strip()
+        except Exception:
+            lv = ""
+        labels.append(lv if lv.lower() not in _skip else f"Scan {scan_n + 1}")
+        scan_n += 1
+    return labels
+
+
 def interpolate_to_grid(wl: np.ndarray, ab: np.ndarray,
                         grid: np.ndarray) -> np.ndarray:
     """Interpolate a single spectrum onto an integer-nm wavelength grid."""
@@ -128,18 +153,26 @@ def load_and_average_files(
 def load_irradiation_series_files(
     file_paths: list[Path],
     grid: np.ndarray,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[str], list[Path]]:
     """
     Load all scans from *file_paths* in file-name order, interpolated onto *grid*.
-    Returns array of shape (n_spectra, n_wavelengths).
+    Returns (series, labels, sources):
+      series  – array (n_spectra, n_wavelengths)
+      labels  – human-readable name for each spectrum
+      sources – source file path for each spectrum
     """
-    series = []
+    series: list[np.ndarray] = []
+    labels: list[str]        = []
+    sources: list[Path]      = []
     for fp in sorted(file_paths):
-        for wl, ab in load_spectra_csv(fp):
+        file_labels = scan_labels_for_file(fp)
+        for scan_label, (wl, ab) in zip(file_labels, load_spectra_csv(fp)):
             series.append(interpolate_to_grid(wl, ab, grid))
+            labels.append(f"{fp.stem}: {scan_label}")
+            sources.append(fp)
     if not series:
         raise ValueError("No valid scans found in irradiation series files.")
-    return np.array(series)
+    return np.array(series), labels, sources
 
 
 def load_pss_files(
@@ -178,6 +211,7 @@ class SpectraParams:
     # positive_pss mode
     pss_fraction_B:         float = 0.85
     pss_fraction_B_error:   float = 0.02
+    pss_obs_wavelength_nm:  Optional[float] = None   # auto-compute f_B from bleaching at this λ
     # spectrum selection (None = all, tuple (start,stop), or list)
     spectrum_indices:       object = None
     # diagnostics
@@ -263,7 +297,7 @@ def run_spectra_extraction(
     params: SpectraParams,
     grid:   np.ndarray,
     S_A_in: np.ndarray,
-    series_in: np.ndarray,
+    series_in: Optional[np.ndarray] = None,
     S_PSS_in: Optional[np.ndarray] = None,
 ) -> SpectraResult:
     """
@@ -278,8 +312,9 @@ def run_spectra_extraction(
     S_PSS_in    : PSS spectrum (positive_pss mode only)
     """
     # ── copy inputs + apply concentration factor ────────────────────────────
-    S_A   = S_A_in.copy()
-    series = series_in.copy()
+    S_A    = S_A_in.copy()
+    series = (series_in.copy() if series_in is not None and len(series_in) > 0
+              else np.empty((0, len(grid))))
     S_PSS  = S_PSS_in.copy() if S_PSS_in is not None else None
 
     if params.concentration_mol_L is not None:
@@ -323,7 +358,8 @@ def run_spectra_extraction(
     alphas = None
     scale = var_explained = None
     n_boot_rejected = 0
-    series_used = series[selected_idx]
+    _pss_f_B_used = None   # filled by positive_pss branch for metadata
+    series_used = series[selected_idx] if len(selected_idx) <= len(series) else series
     # diagnostic accumulators (None unless show_diagnostics=True and mode supports it)
     _diag_B_estimates   = None
     _diag_most_conv     = None
@@ -343,52 +379,84 @@ def run_spectra_extraction(
             raise ValueError(
                 f"Initial absorbance at reference ({ref_desc}) ≤ 0.")
 
-        alpha_lo = max(0.0, params.min_alpha)
-        alpha_hi = min(1.0, params.max_alpha)
-
-        used_idx = [i for i in selected_idx
-                    if alpha_lo < ref_absorbance(series[i], ref_indices) / A0_ref < alpha_hi]
-        alpha_excl = len(selected_idx) - len(used_idx)
-        print(f"α filter [{alpha_lo:.2f}, {alpha_hi:.2f}]: "
-              f"{len(used_idx)} used, {alpha_excl} excluded.")
-
-        if len(used_idx) < 2:
-            raise ValueError(
-                "Fewer than 2 spectra pass the α filter. "
-                "Widen the min_alpha / max_alpha range.")
-
-        series_used = series[used_idx]
-        B_estimates = []
-        alphas_list = []
-        n_neg_rejected = 0
-        for S_i in series_used:
-            a = compute_alpha(S_i, S_A, ref_indices, params.reference_weighted)
+        # ── PSS-only path: no irradiation series → use single PSS spectrum ──
+        if n_total == 0:
+            if S_PSS is None:
+                raise ValueError(
+                    "No irradiation spectra loaded and no PSS spectrum provided. "
+                    "Load an irradiation series OR a PSS spectrum file.")
+            a = compute_alpha(S_PSS, S_A, ref_indices, params.reference_weighted)
             if np.isnan(a) or a <= 0 or a >= 1:
-                continue
-            B_i = (S_i - a * S_A) / (1.0 - a)
-            if params.exclude_negative_SB and np.any(B_i < -sb_tolerance):
-                n_neg_rejected += 1
-                continue
-            B_estimates.append(B_i)
-            alphas_list.append(a)
+                raise ValueError(
+                    f"Computed α = {a:.4f} from PSS spectrum at reference "
+                    f"'{ref_desc}' is outside the valid range (0, 1). "
+                    "Verify the reference region is where only A absorbs "
+                    "and B does not.")
+            S_B = (S_PSS - a * S_A) / (1.0 - a)
+            # Propagate α uncertainty → S_B uncertainty
+            # dS_B/dα = (S_PSS − S_A) / (1−α)²
+            A_ref_mean = float(np.mean(S_A[ref_indices]))
+            sigma_alpha = baseline_noise / A_ref_mean if A_ref_mean > 0 else 0.01
+            dSB_dalpha = (S_PSS - S_A) / (1.0 - a) ** 2
+            S_B_std = np.abs(dSB_dalpha) * sigma_alpha
+            S_B_lo = S_B - S_B_std
+            S_B_hi = S_B + S_B_std
+            alphas = np.array([a])
+            series_used = np.empty((0, len(grid)))
+            print(f"Negative mode (PSS-only): α = {a:.4f} from reference "
+                  f"{ref_desc}, σ_α ≈ {sigma_alpha:.5f}")
 
-        if n_neg_rejected:
-            print(f"  {n_neg_rejected} spectra rejected (S_B < −tolerance).")
+        # ── Standard path: irradiation series ───────────────────────────────
+        else:
+            alpha_lo = max(0.0, params.min_alpha)
+            alpha_hi = min(1.0, params.max_alpha)
 
-        if len(B_estimates) < 2:
-            raise ValueError("Fewer than 2 valid spectra after negative-SB filter.")
+            used_idx = [i for i in selected_idx
+                        if alpha_lo < ref_absorbance(series[i], ref_indices) / A0_ref < alpha_hi]
+            alpha_excl = len(selected_idx) - len(used_idx)
+            print(f"α filter [{alpha_lo:.2f}, {alpha_hi:.2f}]: "
+                  f"{len(used_idx)} used, {alpha_excl} excluded.")
 
-        B_arr    = np.array(B_estimates)
-        S_B      = B_arr.mean(axis=0)
-        S_B_std  = B_arr.std(axis=0, ddof=1)
-        S_B_lo   = S_B - S_B_std
-        S_B_hi   = S_B + S_B_std
-        alphas   = np.array(alphas_list)
-        print(f"Negative mode: used {len(B_estimates)} spectra, "
-              f"α range {alphas.min():.3f}–{alphas.max():.3f}")
-        _diag_B_estimates = B_arr if params.show_diagnostics else None
-        _diag_most_conv   = (series_used[np.argmin(alphas)]
-                             if params.show_diagnostics else None)
+            if len(used_idx) < 2:
+                raise ValueError(
+                    "Fewer than 2 spectra pass the α filter. "
+                    "Widen the min_alpha / max_alpha range.\n\n"
+                    "Tip: if you only have a PSS spectrum (no irradiation series), "
+                    "load it as a PSS file (not as irradiation files) — the "
+                    "negative mode will then compute α directly from that single spectrum.")
+
+            series_used = series[used_idx]
+            B_estimates = []
+            alphas_list = []
+            n_neg_rejected = 0
+            for S_i in series_used:
+                a = compute_alpha(S_i, S_A, ref_indices, params.reference_weighted)
+                if np.isnan(a) or a <= 0 or a >= 1:
+                    continue
+                B_i = (S_i - a * S_A) / (1.0 - a)
+                if params.exclude_negative_SB and np.any(B_i < -sb_tolerance):
+                    n_neg_rejected += 1
+                    continue
+                B_estimates.append(B_i)
+                alphas_list.append(a)
+
+            if n_neg_rejected:
+                print(f"  {n_neg_rejected} spectra rejected (S_B < −tolerance).")
+
+            if len(B_estimates) < 2:
+                raise ValueError("Fewer than 2 valid spectra after negative-SB filter.")
+
+            B_arr    = np.array(B_estimates)
+            S_B      = B_arr.mean(axis=0)
+            S_B_std  = B_arr.std(axis=0, ddof=1)
+            S_B_lo   = S_B - S_B_std
+            S_B_hi   = S_B + S_B_std
+            alphas   = np.array(alphas_list)
+            print(f"Negative mode: used {len(B_estimates)} spectra, "
+                  f"α range {alphas.min():.3f}–{alphas.max():.3f}")
+            _diag_B_estimates = B_arr if params.show_diagnostics else None
+            _diag_most_conv   = (series_used[np.argmin(alphas)]
+                                 if params.show_diagnostics else None)
 
     # ── PCA (negative_pca / positive_pca) ─────────────────────────────────
     elif mode in ("negative_pca", "positive_pca"):
@@ -476,13 +544,35 @@ def run_spectra_extraction(
         if S_PSS is None:
             raise ValueError(
                 "positive_pss mode requires PSS spectrum files to be loaded.")
-        f_B     = params.pss_fraction_B
-        f_B_err = params.pss_fraction_B_error
+
+        if params.pss_obs_wavelength_nm is not None:
+            obs_idx  = int(np.argmin(np.abs(grid - params.pss_obs_wavelength_nm)))
+            sa_obs   = float(S_A[obs_idx])
+            spss_obs = float(S_PSS[obs_idx])
+            if sa_obs <= 0:
+                raise ValueError(
+                    f"Initial absorbance at obs λ ({params.pss_obs_wavelength_nm:.0f} nm) ≤ 0. "
+                    "Choose a wavelength where species A absorbs.")
+            f_B = 1.0 - spss_obs / sa_obs
+            if not (0.01 < f_B < 0.99):
+                raise ValueError(
+                    f"Auto-computed f_B = {f_B:.3f} at "
+                    f"{params.pss_obs_wavelength_nm:.0f} nm is out of valid range "
+                    "(0.01–0.99). Choose the wavelength of maximum bleaching.")
+            f_B_err = params.pss_fraction_B_error
+            print(f"Auto-computed f_B = {f_B:.4f} from bleaching at "
+                  f"{params.pss_obs_wavelength_nm:.1f} nm  "
+                  f"[A₀ = {sa_obs:.4f}, A_PSS = {spss_obs:.4f}]")
+        else:
+            f_B     = params.pss_fraction_B
+            f_B_err = params.pss_fraction_B_error
+
+        _pss_f_B_used = f_B
         S_B     = (S_PSS - (1.0 - f_B) * S_A) / f_B
         S_B_lo  = (S_PSS - (1.0 - (f_B + f_B_err)) * S_A) / (f_B + f_B_err)
         S_B_hi  = (S_PSS - (1.0 - (f_B - f_B_err)) * S_A) / (f_B - f_B_err)
         S_B_std = (S_B_hi - S_B_lo) / 2.0
-        print(f"PSS mode: f_B = {f_B} ± {f_B_err}")
+        print(f"PSS mode: f_B = {f_B:.4f} ± {f_B_err:.4f}")
     else:
         raise ValueError(f"Unknown mode '{mode}'.")
 
@@ -499,11 +589,18 @@ def run_spectra_extraction(
     if params.baseline_offset != 0.0:
         meta.append(f"Baseline offset  : {params.baseline_offset:+.6f}")
     if mode == "negative" and alphas is not None:
-        meta += [
-            f"α window         : [{params.min_alpha:.2f}, {params.max_alpha:.2f}]",
-            f"α range (used)   : {alphas.min():.3f}–{alphas.max():.3f}",
-            f"Reference        : {params.reference_wavelength_nm} nm",
-        ]
+        if n_total == 0:
+            meta += [
+                f"Method           : PSS-only (single spectrum)",
+                f"α (from PSS)     : {alphas[0]:.4f}",
+                f"Reference        : {params.reference_wavelength_nm} nm",
+            ]
+        else:
+            meta += [
+                f"α window         : [{params.min_alpha:.2f}, {params.max_alpha:.2f}]",
+                f"α range (used)   : {alphas.min():.3f}–{alphas.max():.3f}",
+                f"Reference        : {params.reference_wavelength_nm} nm",
+            ]
     elif mode in ("negative_pca", "positive_pca") and alphas is not None:
         meta += [
             f"PC1 variance     : {var_explained*100:.1f}%",
@@ -511,9 +608,11 @@ def run_spectra_extraction(
             f"α range          : {alphas.min():.3f}–{alphas.max():.3f}",
             f"Bootstrap        : {params.n_bootstrap} ({n_boot_rejected} rejected)",
         ]
-    elif mode == "positive_pss":
+    elif mode == "positive_pss" and _pss_f_B_used is not None:
+        obs_info = (f" (auto from {params.pss_obs_wavelength_nm:.0f} nm)"
+                    if params.pss_obs_wavelength_nm is not None else "")
         meta += [
-            f"f_B              : {params.pss_fraction_B} ± {params.pss_fraction_B_error}",
+            f"f_B              : {_pss_f_B_used:.4f} ± {params.pss_fraction_B_error}{obs_info}",
         ]
 
     # ── Convergence diagnostic (when requested, for modes with a series) ────────
@@ -599,10 +698,11 @@ def plot_overview(
 
     ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
 
-    sm = mcm.ScalarMappable(cmap=cmap, norm=mcolors.Normalize(0, max(n - 1, 1)))
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax, label="Spectrum index (early → late)",
-                 fraction=0.03, pad=0.01)
+    if n > 0:
+        sm = mcm.ScalarMappable(cmap=cmap, norm=mcolors.Normalize(0, max(n - 1, 1)))
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="Spectrum index (early → late)",
+                     fraction=0.03, pad=0.01)
 
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("Absorbance")
@@ -614,10 +714,11 @@ def plot_overview(
     inset_wl_min = grid[-1] - baseline_inset_nm
     inset_mask   = grid >= inset_wl_min
     ax_in = ax.inset_axes([0.60, 0.55, 0.35, 0.38])
-    for j, s in enumerate(series):
-        c = cmap(j / max(n - 1, 1))
-        ax_in.plot(grid[inset_mask], s[inset_mask], color=c,
-                   linewidth=0.7, alpha=0.6)
+    if n > 0:
+        for j, s in enumerate(series):
+            c = cmap(j / max(n - 1, 1))
+            ax_in.plot(grid[inset_mask], s[inset_mask], color=c,
+                       linewidth=0.7, alpha=0.6)
     ax_in.plot(grid[inset_mask], S_A[inset_mask],
                color="steelblue", linewidth=1.5)
     if S_PSS is not None:
@@ -636,7 +737,7 @@ def plot_extraction_result(result: SpectraResult) -> Figure:
     fig = Figure(figsize=(9, 5))
     ax  = fig.add_subplot(111)
 
-    if result.series_used is not None:
+    if result.series_used is not None and len(result.series_used) > 0:
         n_show = min(5, len(result.series_used))
         step   = max(1, len(result.series_used) // n_show)
         shown  = result.series_used[::step]
