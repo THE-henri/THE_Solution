@@ -96,11 +96,12 @@ class PlotWidget(QWidget):
         if self._fig is not None:
             plt.close(self._fig)
 
-        # Remove old canvas / placeholder
+        # Remove old canvas / placeholder (never destroy the placeholder itself)
         while self._canvas_layout.count():
             item = self._canvas_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w and w is not self._placeholder:
+                w.deleteLater()
 
         if self._mpl_toolbar is not None:
             self._mpl_toolbar.deleteLater()
@@ -126,8 +127,9 @@ class PlotWidget(QWidget):
 
         while self._canvas_layout.count():
             item = self._canvas_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w and w is not self._placeholder:
+                w.deleteLater()
 
         if self._mpl_toolbar is not None:
             self._mpl_toolbar.deleteLater()

@@ -286,7 +286,7 @@ for csv_file in csv_files:
                 "Temperature_C": temperature_value,
                 "Switch":        switch,
                 "A0":            popt[0],
-                "A_inf":         popt[1] if switch == "negative" else None,
+                "A_inf":         float(popt[1]) if popt is not None and len(popt) >= 3 else None,
                 "k":             popt[-1],
                 "Half_life_s":   t_half,
                 "R2":            r2,

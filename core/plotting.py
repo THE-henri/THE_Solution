@@ -143,15 +143,15 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
             return f"{v:.4e}" if abs(v) >= 1000 or (v != 0 and abs(v) < 1e-3) \
                    else f"{v:.4f}"
 
-        if switch == "negative":
-            A0, A_inf_p, k = popt[0], popt[1], popt[2]
-            eq_line   = r"$A(t)=A_\infty+(A_0-A_\infty)\,e^{-kt}$"
+        # popt is always 3-element (A0, A_inf, k) for both switch types
+        A0, A_inf_p, k = popt[0], popt[1], popt[2]
+        if switch == "negative" or abs(A_inf_p) > 1e-10:
+            eq_line     = r"$A(t)=A_\infty+(A_0-A_\infty)\,e^{-kt}$"
             param_lines = (f"$A_0$ = {_fmt(A0)}\n"
                            f"$A_\\infty$ = {_fmt(A_inf_p)}\n"
                            f"$k$ = {k:.4f} s$^{{-1}}$")
         else:
-            A0, k = popt[0], popt[1]
-            eq_line   = r"$A(t)=A_0\,e^{-kt}$"
+            eq_line     = r"$A(t)=A_0\,e^{-kt}$"
             param_lines = (f"$A_0$ = {_fmt(A0)}\n"
                            f"$k$ = {k:.4f} s$^{{-1}}$")
 
@@ -174,14 +174,14 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
 
     # --- Right panel: linearised ---
     if popt is not None and time_sel is not None and absorbance_sel is not None:
-        if switch == "negative":
-            A_inf = popt[1]
-            delta_A = absorbance_sel - A_inf
-            valid = np.abs(delta_A) > 1e-10
+        # popt is always (A0, A_inf, k) \u2014 use A_inf to compute delta
+        A_inf   = float(popt[1])
+        delta_A = absorbance_sel - A_inf
+        if abs(A_inf) > 1e-10:
+            valid   = np.abs(delta_A) > 1e-10
             y_label = "ln|Absorbance \u2212 A\u221e|"
         else:
-            delta_A = absorbance_sel
-            valid = delta_A > 0
+            valid   = absorbance_sel > 0
             y_label = "ln(Absorbance)"
 
         if valid.sum() > 1:
@@ -189,19 +189,18 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
             ln_vals = np.log(np.abs(delta_A[valid]))
             ax2.plot(t_valid, ln_vals, 'o', markeredgecolor='orange',
                      markerfacecolor='none', markersize=4, label='Data (linearised)')
-            coeffs = np.polyfit(t_valid, ln_vals, 1)
+            coeffs   = np.polyfit(t_valid, ln_vals, 1)
             k_linear = -coeffs[0]
             ax2.plot(t_valid, np.polyval(coeffs, t_valid), '--', color='red',
                      linewidth=2, label=f"Linear fit  k = {k_linear:.4f} s\u207b\u00b9")
 
         # Overlay outliers on the linearised panel
         if time_outliers is not None and len(time_outliers) > 0:
-            if switch == "negative":
-                delta_out = absorbance_outliers - popt[1]
-                loggable = delta_out != 0
+            delta_out = absorbance_outliers - A_inf
+            if abs(A_inf) > 1e-10:
+                loggable = np.abs(delta_out) > 1e-10
             else:
-                delta_out = absorbance_outliers
-                loggable = delta_out > 0
+                loggable = absorbance_outliers > 0
             if loggable.sum() > 0:
                 ax2.plot(time_outliers[loggable], np.log(np.abs(delta_out[loggable])),
                          'x', color='red', markersize=6, markeredgewidth=1.5,

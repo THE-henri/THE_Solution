@@ -16,6 +16,7 @@ Stage layout
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +36,7 @@ from PyQt6.QtWidgets import (
 from gui.tabs.spectra_core import (
     SpectraParams, SpectraResult,
     load_and_average_files, load_irradiation_series_files, load_pss_files,
-    run_spectra_extraction,
+    run_spectra_extraction, _smooth_spectrum,
     plot_overview, plot_extraction_result,
     plot_sb_diagnostic, plot_pca_diagnostic, plot_convergence,
 )
@@ -78,6 +79,7 @@ class SpectraTab(QWidget):
         self._series:         Optional[np.ndarray] = None
         self._S_PSS:          Optional[np.ndarray] = None
         self._result:         Optional[SpectraResult] = None
+        self._raw_result:     Optional[SpectraResult] = None   # unsmoothed extraction
         self._worker:         Optional[Worker] = None
         # EC spectrum for concentration calculation
         self._ec_wl_arr:      Optional[np.ndarray] = None
@@ -725,6 +727,65 @@ class SpectraTab(QWidget):
         diag_row.addStretch()
         self._stage3.add_layout(diag_row)
 
+        # ── Smoothing toggle row
+        smooth_row = QHBoxLayout()
+        self._smooth_cb = QCheckBox("Smooth S_B")
+        self._smooth_cb.setToolTip(
+            "Apply post-extraction smoothing to the displayed S_B.\n"
+            "Toggle at any time without re-running the extraction.\n"
+            "The saved CSV will contain the smoothed spectrum when enabled."
+        )
+        smooth_row.addWidget(self._smooth_cb)
+        smooth_row.addWidget(InfoButton(
+            "Smoothing",
+            "Applies a filter to the extracted S_B spectrum and its uncertainty\n"
+            "bounds after extraction — toggle without re-running.\n\n"
+            "Savitzky-Golay preserves peak positions and heights better than\n"
+            "a Gaussian blur. Use a small window (5-15 nm) to reduce noise\n"
+            "without distorting peaks.\n\n"
+            "The CSV will contain the smoothed S_B when smoothing is enabled.",
+        ))
+        smooth_row.addSpacing(12)
+        self._smooth_method_combo = QComboBox()
+        self._smooth_method_combo.addItems(["Savitzky-Golay", "Gaussian"])
+        self._smooth_method_combo.setFixedWidth(140)
+        smooth_row.addWidget(self._smooth_method_combo)
+        smooth_row.addSpacing(8)
+        smooth_row.addWidget(QLabel("Window (nm):"))
+        self._smooth_window_spin = QSpinBox()
+        self._smooth_window_spin.setRange(3, 101)
+        self._smooth_window_spin.setSingleStep(2)
+        self._smooth_window_spin.setValue(7)
+        self._smooth_window_spin.setFixedWidth(65)
+        smooth_row.addWidget(self._smooth_window_spin)
+        smooth_row.addSpacing(8)
+        self._smooth_order_lbl = QLabel("Poly order:")
+        smooth_row.addWidget(self._smooth_order_lbl)
+        self._smooth_order_spin = QSpinBox()
+        self._smooth_order_spin.setRange(1, 5)
+        self._smooth_order_spin.setValue(2)
+        self._smooth_order_spin.setFixedWidth(50)
+        smooth_row.addWidget(self._smooth_order_spin)
+        smooth_row.addStretch()
+        self._stage3.add_layout(smooth_row)
+
+        def _update_smooth_controls():
+            enabled = self._smooth_cb.isChecked()
+            is_sg   = self._smooth_method_combo.currentText() == "Savitzky-Golay"
+            self._smooth_method_combo.setVisible(enabled)
+            self._smooth_window_spin.setVisible(enabled)
+            self._smooth_order_lbl.setVisible(enabled and is_sg)
+            self._smooth_order_spin.setVisible(enabled and is_sg)
+
+        self._smooth_cb.toggled.connect(_update_smooth_controls)
+        self._smooth_method_combo.currentTextChanged.connect(_update_smooth_controls)
+        _update_smooth_controls()
+
+        self._smooth_cb.toggled.connect(self._apply_smoothing_display)
+        self._smooth_method_combo.currentTextChanged.connect(self._apply_smoothing_display)
+        self._smooth_window_spin.valueChanged.connect(self._apply_smoothing_display)
+        self._smooth_order_spin.valueChanged.connect(self._apply_smoothing_display)
+
         self._result_plot = PlotWidget(
             info_title="Extraction Result",
             info_text="Extracted S_B spectrum with ±1σ / 95% CI shading. "
@@ -761,9 +822,18 @@ class SpectraTab(QWidget):
         self._save_btn.setFixedWidth(230)
         self._save_btn.clicked.connect(self._save_result)
         self._save_btn.setEnabled(False)
+        self._export_qy_btn = QPushButton("Export ε for QY tab…")
+        self._export_qy_btn.setFixedWidth(180)
+        self._export_qy_btn.setToolTip(
+            "Save Species A and Species B as separate CSVs\n"
+            "with a 'Mean' column — ready to load directly in\n"
+            "the Quantum Yield tab (Stage 3 → ε CSV source).")
+        self._export_qy_btn.clicked.connect(self._export_for_qy)
+        self._export_qy_btn.setEnabled(False)
         self._save_status_lbl = QLabel("")
         self._save_status_lbl.setStyleSheet("color:#555;")
         save_row.addWidget(self._save_btn)
+        save_row.addWidget(self._export_qy_btn)
         save_row.addWidget(self._save_status_lbl, 1)
         save_row.addStretch()
         self._stage3.add_layout(save_row)
@@ -872,6 +942,7 @@ class SpectraTab(QWidget):
         self._diag_plot1.hide()
         self._diag_plot2.hide()
         self._save_btn.setEnabled(False)
+        self._export_qy_btn.setEnabled(False)
 
     # ── Mode change ───────────────────────────────────────────────────────────
 
@@ -995,6 +1066,7 @@ class SpectraTab(QWidget):
         self._stage3.set_status(WAITING)
         self._result_plot.hide()
         self._save_btn.setEnabled(False)
+        self._export_qy_btn.setEnabled(False)
 
     def _on_load_error(self, msg):
         self._load_status_lbl.setText(f"Error: {msg}")
@@ -1196,9 +1268,10 @@ class SpectraTab(QWidget):
 
     def _on_extract_done(self, res):
         result, fig = res
-        self._result = result
+        self._raw_result = result
 
-        self._result_plot.set_figure(fig)
+        self._apply_smoothing_display()
+
         if self._output_path:
             self._result_plot.set_save_dir(self._output_path / "spectra" / "results" / "plots")
         cname = result.compound or "spectra"
@@ -1225,6 +1298,27 @@ class SpectraTab(QWidget):
             f"Done — {result.n_spectra_used} of {result.n_spectra_total} spectra used")
         self._stage3.set_status(DONE)
         self._save_btn.setEnabled(True)
+        self._export_qy_btn.setEnabled(True)
+
+    def _apply_smoothing_display(self, *_):
+        """Re-render the result plot with or without smoothing applied to S_B."""
+        if self._raw_result is None:
+            return
+        r = self._raw_result
+        if self._smooth_cb.isChecked():
+            method   = ("savitzky_golay"
+                        if self._smooth_method_combo.currentText() == "Savitzky-Golay"
+                        else "gaussian")
+            window   = self._smooth_window_spin.value()
+            polyord  = self._smooth_order_spin.value()
+            sm = lambda s: _smooth_spectrum(s, method, window, polyord)
+            r = copy.copy(r)
+            r.S_B     = sm(r.S_B)
+            r.S_B_std = sm(r.S_B_std)
+            r.S_B_lo  = sm(r.S_B_lo)
+            r.S_B_hi  = sm(r.S_B_hi)
+        self._result = r
+        self._result_plot.set_figure(plot_extraction_result(r))
 
     def _on_extract_error(self, msg):
         self._run_status_lbl.setText(f"Error: {msg}")
@@ -1269,6 +1363,55 @@ class SpectraTab(QWidget):
         self._save_status_lbl.setText(f"Saved → {out.name}")
         self.log_signal.emit(
             f"[Spectra] Extracted spectra saved to {out}", "info")
+
+    def _export_for_qy(self):
+        """Save Species A and B as separate QY-compatible CSVs (Wavelength_nm + Mean)."""
+        if self._result is None:
+            return
+        r = self._result
+
+        default_dir = self._output_path / "spectra" / "results" \
+            if self._output_path else Path.home()
+        default_dir.mkdir(parents=True, exist_ok=True)
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Export ε for QY tab — choose folder", str(default_dir))
+        if not folder:
+            return
+
+        folder  = Path(folder)
+        cname   = r.compound or "spectra"
+        saved   = []
+        errors  = []
+
+        def _write(path: Path, data: dict) -> bool:
+            try:
+                pd.DataFrame(data).to_csv(path, index=False)
+                saved.append(path.name)
+                self.log_signal.emit(f"[Spectra] QY export → {path}", "info")
+                return True
+            except PermissionError:
+                errors.append(
+                    f"{path.name} — permission denied "
+                    f"(close the file in Excel or another app and try again)")
+                return False
+            except Exception as exc:
+                errors.append(f"{path.name} — {exc}")
+                return False
+
+        out_a = folder / f"{cname}_species_A_epsilon.csv"
+        _write(out_a, {"Wavelength_nm": r.grid, "Mean": r.S_A})
+
+        if r.S_B is not None:
+            out_b = folder / f"{cname}_species_B_epsilon.csv"
+            _write(out_b, {"Wavelength_nm": r.grid, "Mean": r.S_B})
+
+        if errors:
+            msg = "Export error: " + "; ".join(errors)
+            self._save_status_lbl.setText(msg)
+            self.log_signal.emit(f"[Spectra] {msg}", "error")
+        else:
+            self._save_status_lbl.setText("Exported: " + "  |  ".join(saved))
 
     # ── Prefs ─────────────────────────────────────────────────────────────────
 

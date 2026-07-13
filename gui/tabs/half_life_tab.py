@@ -321,6 +321,19 @@ class KineticsPanel(QWidget):
         self._k_detect_ch_combo.addItem("Auto (max Δabs)")
         auto_row.addWidget(self._k_detect_ch_combo)
 
+        auto_row.addWidget(QLabel("Min. peak size:"))
+        self._k_detect_prom = QSpinBox()
+        self._k_detect_prom.setRange(1, 99)
+        self._k_detect_prom.setValue(10)
+        self._k_detect_prom.setSuffix(" %")
+        self._k_detect_prom.setFixedWidth(68)
+        self._k_detect_prom.setToolTip(
+            "Minimum irradiation-event size as a percentage of the total\n"
+            "absorbance range of the trace.\n\n"
+            "Increase this value if too many spurious segments are detected\n"
+            "(less sensitive). Decrease it if real events are being missed.")
+        auto_row.addWidget(self._k_detect_prom)
+
         self._k_detect_lbl = QLabel("")
         self._k_detect_lbl.setObjectName("detected_label")
         auto_row.addWidget(self._k_detect_lbl)
@@ -437,10 +450,12 @@ class KineticsPanel(QWidget):
             best = chosen if chosen in active else max(
                 active, key=lambda l: float(np.ptp(self._channels[l][1])))
 
-        switch = "negative" if self._k_sw_neg.isChecked() else "positive"
+        switch   = "negative" if self._k_sw_neg.isChecked() else "positive"
+        min_prom = self._k_detect_prom.value() / 100.0
         time, absorbance = self._channels[best]
 
-        segs = find_thermal_segments(time, absorbance, switch=switch)
+        segs = find_thermal_segments(time, absorbance, switch=switch,
+                                     min_prominence_frac=min_prom)
         if not segs:
             self._k_detect_lbl.setText("No segments detected")
             self._k_detect_lbl.setObjectName("warning_label")
@@ -482,16 +497,20 @@ class KineticsPanel(QWidget):
             self._k_apply_segment(self._seg_idx)
 
     def _k_manual_segments_init(self):
-        """Split current Start–End range into N equal segments."""
+        """Split the full loaded time range into N equal segments."""
         n = self._k_n_manual_segs.value()
-        t0 = self._k_t_start.value()
-        t1 = self._k_t_end.value()
-        if t1 <= t0 or not self._channels:
+        if not self._channels:
+            return
+        # Always use the full data range, not the current spinbox values.
+        # The spinboxes may show only one segment's boundaries after a
+        # previous auto-detect or manual navigation call.
+        t0 = self._k_t_start.minimum()
+        t1 = self._k_t_end.maximum()
+        if t1 <= t0:
             return
         step = (t1 - t0) / n
         self._segments = [(t0 + i * step, t0 + (i + 1) * step) for i in range(n)]
         self._seg_idx = 0
-        # Clear any auto-detect status text to avoid confusion
         self._k_detect_lbl.setText("")
         self._k_seg_nav.setVisible(n > 1)
         self._k_apply_segment(0)
@@ -641,14 +660,12 @@ class KineticsPanel(QWidget):
             switch = r.switch
             # Column label: custom > wavelength-augmented > raw label
             col_lbl = self._k_pub_col_label(r.label) if n_results == 1 else r.label
-            if switch == "negative":
-                a_inf = float(popt[1]); a0 = float(popt[0]); k_exp = float(popt[2])
-                ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
-                valid   = np.abs(r.abs_clean - a_inf) > 1e-10
-            else:
-                a0 = float(popt[0]); k_exp = float(popt[1]); a_inf = 0.0
-                ln_data = np.log(np.maximum(np.abs(r.abs_clean), 1e-20))
-                valid   = r.abs_clean > 0
+            # popt is always 3-element (A0, A_inf, k) for both switch types
+            a0    = float(popt[0])
+            a_inf = float(popt[1])
+            k_exp = float(popt[2])
+            ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
+            valid   = np.abs(r.abs_clean - a_inf) > 1e-10
             # k / t_half / R² — honour the user's fit-mode choice
             if use_linear and r.k_linear is not None:
                 k_save      = r.k_linear
@@ -704,11 +721,14 @@ class KineticsPanel(QWidget):
         ainf_row.addWidget(InfoButton(
             "A∞ — asymptote",
             "The absorbance at infinite time (thermal equilibrium).\n\n"
-            "'Fit freely': A∞ is a free parameter — use when the plateau is "
-            "visible in the data.\n\n"
-            "'Fix to value': A∞ is held fixed — use when the decay doesn't "
-            "reach the plateau within the measurement window, or when you know "
-            "the equilibrium value (e.g. 0 for full bleaching).",
+            "'Fit freely': A∞ is a free parameter extracted from the data.\n"
+            "  Negative switch: builds up to A∞.\n"
+            "  Positive switch: the baseline offset is extracted from the decay.\n\n"
+            "'Fix to value': A∞ is held fixed. Set to 0 for a pure decay to "
+            "zero, or enter a measured baseline value.\n\n"
+            "Use 'Compute from interval' to measure A∞ directly from a flat "
+            "region of the trace (e.g. before irradiation for positive switch, "
+            "or after full recovery for negative switch).",
         ))
         self._k_ainf_free  = QRadioButton("Fit freely")
         self._k_ainf_fixed = QRadioButton("Fix to:")
@@ -733,6 +753,35 @@ class KineticsPanel(QWidget):
         self._k_ainf_free.toggled.connect(lambda _: self._k_update_linear_k_available())
         self._k_ainf_val.valueChanged.connect(self._k_mark_stale)
 
+        # ── Compute A∞ from a baseline interval ───────────────────────────
+        bl_row = QHBoxLayout()
+        bl_row.setSpacing(4)
+        bl_lbl = QLabel("Compute A∞ from interval:")
+        bl_lbl.setObjectName("pref_label")
+        bl_row.addWidget(bl_lbl)
+        self._k_bl_start = QDoubleSpinBox()
+        self._k_bl_start.setRange(0, 1e9)
+        self._k_bl_start.setDecimals(3)
+        self._k_bl_start.setSuffix(" s")
+        self._k_bl_start.setFixedWidth(110)
+        bl_row.addWidget(self._k_bl_start)
+        bl_row.addWidget(QLabel("to"))
+        self._k_bl_end = QDoubleSpinBox()
+        self._k_bl_end.setRange(0, 1e9)
+        self._k_bl_end.setDecimals(3)
+        self._k_bl_end.setSuffix(" s")
+        self._k_bl_end.setFixedWidth(110)
+        bl_row.addWidget(self._k_bl_end)
+        btn_bl = QPushButton("→ Set A∞")
+        btn_bl.setFixedWidth(80)
+        btn_bl.setToolTip(
+            "Compute the mean absorbance of all checked channels "
+            "in the specified interval and use it as A∞.")
+        btn_bl.clicked.connect(self._k_compute_baseline)
+        bl_row.addWidget(btn_bl)
+        bl_row.addStretch()
+        card.add_layout(bl_row)
+
         card.add_widget(_sep())
 
         # IQR factor
@@ -743,8 +792,16 @@ class KineticsPanel(QWidget):
             "factor × IQR are excluded before the final fit.\n\n"
             "Typical values: 3 (strict) to 50 (very lenient).\n"
             "Watch out: very low values may remove real data near the "
-            "end of the decay.",
+            "end of the decay.\n\n"
+            "Uncheck 'Enabled' to skip outlier removal entirely and fit "
+            "all selected points directly.",
         )
+        self._k_iqr_enabled = QCheckBox("Enabled")
+        self._k_iqr_enabled.setChecked(True)
+        self._k_iqr_enabled.setToolTip("Uncheck to skip outlier removal and use all selected points.")
+        self._k_iqr_enabled.toggled.connect(lambda on: self._k_iqr.setEnabled(on))
+        self._k_iqr_enabled.toggled.connect(self._k_mark_stale)
+        iqr_row.addWidget(self._k_iqr_enabled)
         self._k_iqr = QDoubleSpinBox()
         self._k_iqr.setRange(0.1, 1000)
         self._k_iqr.setDecimals(1)
@@ -955,8 +1012,8 @@ class KineticsPanel(QWidget):
     # ── Stage 5 actions ────────────────────────────────────────────────────
 
     def _k_update_linear_k_available(self):
-        """Grey out 'Linear fit' radio when A∞ is unknown (negative + free fit)."""
-        available = not (self._k_sw_neg.isChecked() and self._k_ainf_free.isChecked())
+        """Grey out 'Linear fit' radio when A∞ is free (unknown until after fitting)."""
+        available = not self._k_ainf_free.isChecked()
         self._k_use_linear_k.setEnabled(available)
         if not available:
             self._k_use_exp_k.setChecked(True)
@@ -974,7 +1031,7 @@ class KineticsPanel(QWidget):
         switch      = "negative" if self._k_sw_neg.isChecked() else "positive"
         a_inf_mode  = "free" if self._k_ainf_free.isChecked() else "fixed"
         a_inf_value = self._k_ainf_val.value() if a_inf_mode == "fixed" else None
-        iqr         = self._k_iqr.value()
+        iqr         = self._k_iqr.value() if self._k_iqr_enabled.isChecked() else None
         temp        = self._k_temp.value()
         t_start     = self._k_t_start.value()
         t_end       = self._k_t_end.value()
@@ -1005,6 +1062,27 @@ class KineticsPanel(QWidget):
         self._worker.finished_signal.connect(
             lambda: self._k_run_btn.setEnabled(True))
         self._worker.start()
+
+    def _k_compute_baseline(self):
+        """Compute mean absorbance in the baseline interval and set as A∞."""
+        active = [lbl for lbl, cb in self._k_checkboxes.items() if cb.isChecked()]
+        if not active or not self._channels:
+            return
+        t0 = self._k_bl_start.value()
+        t1 = self._k_bl_end.value()
+        if t1 <= t0:
+            return
+        means = []
+        for lbl in active:
+            time, abs_ = self._channels[lbl]
+            mask = (time >= t0) & (time <= t1)
+            if mask.sum() > 0:
+                means.append(float(abs_[mask].mean()))
+        if not means:
+            return
+        value = float(np.mean(means))
+        self._k_ainf_val.setValue(value)
+        self._k_ainf_fixed.setChecked(True)
 
     @pyqtSlot(object)
     def _k_on_fit_done(self, results: list[FitResult]):
@@ -1083,7 +1161,7 @@ class KineticsPanel(QWidget):
                 "Temperature_C": r.temperature_c,
                 "Switch":        switch_val,
                 "A0":            popt[0] if popt is not None else None,
-                "A_inf":         popt[1] if (popt is not None and switch_val == "negative") else None,
+                "A_inf":         float(popt[1]) if popt is not None and len(popt) >= 3 else None,
                 "k":             k_saved,
                 "Half_life_s":   t_half_saved,
                 "R2":            r2_saved,
@@ -1671,8 +1749,8 @@ class ScanningKineticsPanel(QWidget):
     # ── Stage 6 actions ────────────────────────────────────────────────────
 
     def _sk_update_linear_k_available(self):
-        """Grey out 'Linear fit' radio when A∞ is unknown (negative + free fit)."""
-        available = not (self._sk_sw_neg.isChecked() and self._sk_ref_free.isChecked())
+        """Grey out 'Linear fit' radio when A∞ is free (unknown until after fitting)."""
+        available = not self._sk_ref_free.isChecked()
         self._sk_use_linear_k.setEnabled(available)
         if not available:
             self._sk_use_exp_k.setChecked(True)
@@ -1799,7 +1877,7 @@ class ScanningKineticsPanel(QWidget):
                 "Temperature_C": r.temperature_c,
                 "Switch":        r.switch,
                 "A0":            r.popt[0] if r.popt is not None else None,
-                "A_inf":         r.popt[1] if (r.popt is not None and r.switch == "negative") else None,
+                "A_inf":         float(r.popt[1]) if r.popt is not None and len(r.popt) >= 3 else None,
                 "k":             k_saved_sk,
                 "Half_life_s":   t_half_saved_sk,
                 "R2":            r2_saved_sk,
@@ -1852,14 +1930,12 @@ class ScanningKineticsPanel(QWidget):
                 continue
             popt   = r.popt
             switch = r.switch
-            if switch == "negative":
-                a_inf = float(popt[1]); a0 = float(popt[0]); k_exp = float(popt[2])
-                ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
-                valid   = np.abs(r.abs_clean - a_inf) > 1e-10
-            else:
-                a0 = float(popt[0]); k_exp = float(popt[1]); a_inf = 0.0
-                ln_data = np.log(np.maximum(np.abs(r.abs_clean), 1e-20))
-                valid   = r.abs_clean > 0
+            # popt is always 3-element (A0, A_inf, k) for both switch types
+            a0    = float(popt[0])
+            a_inf = float(popt[1])
+            k_exp = float(popt[2])
+            ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
+            valid   = np.abs(r.abs_clean - a_inf) > 1e-10
             # k / t_half / R² — honour the user's fit-mode choice
             if use_linear and r.k_linear is not None:
                 k_save      = r.k_linear

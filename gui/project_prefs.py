@@ -54,6 +54,8 @@ class LEDCharacterisationPrefs:
     smoothing_window:       int   = 11
     smoothing_order:        int   = 3
     photon_flux_std_manual: float = 0.0
+    power_t_start:          float = 0.0
+    power_t_end:            float = 9999.0
 
 
 @dataclass

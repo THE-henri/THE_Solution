@@ -379,6 +379,8 @@ def run_led_characterization(
     smoothing_order:        int,
     integration_mode:       str,      # "scalar" | "full"
     photon_flux_std_manual: float,
+    power_t_start:          float = 0.0,
+    power_t_end:            float = float("inf"),
 ) -> LEDResult:
     """
     Compute the LED spectral photon flux density N(λ) [mol s⁻¹ nm⁻¹].
@@ -423,19 +425,33 @@ def run_led_characterization(
           f"({em_wl[0]:.0f}–{em_wl[-1]:.0f} nm)")
 
     # ── Load power file(s) ─────────────────────────────────────────────────
-    pwr_df_b   = pd.read_csv(power_before_path, comment="#")
-    P_before   = float(pwr_df_b["power_mW"].mean())
-    pwr_time_b = pwr_df_b["time_s"].values.astype(float)
-    pwr_vals_b = pwr_df_b["power_mW"].values.astype(float)
+    def _load_power(path: Path):
+        df   = pd.read_csv(path, comment="#")
+        t    = df["time_s"].values.astype(float)
+        vals = df["power_mW"].values.astype(float)
+        mask = (t >= power_t_start) & (t <= power_t_end)
+        if mask.any():
+            t_sel, v_sel = t[mask], vals[mask]
+        else:
+            print(f"  Warning: power window {power_t_start}–{power_t_end} s "
+                  f"matches no points in {path.name} — using all points.")
+            t_sel, v_sel = t, vals
+        return t_sel, v_sel, float(v_sel.mean())
+
+    pwr_time_b, pwr_vals_b, P_before = _load_power(power_before_path)
     P_after: Optional[float] = None
     pwr_time_a: Optional[np.ndarray] = None
     pwr_vals_a: Optional[np.ndarray] = None
 
     if power_after_path is not None and power_after_path.exists():
-        pwr_df_a = pd.read_csv(power_after_path, comment="#")
-        P_after  = float(pwr_df_a["power_mW"].mean())
-        pwr_time_a = pwr_df_a["time_s"].values.astype(float)
-        pwr_vals_a = pwr_df_a["power_mW"].values.astype(float)
+        pwr_time_a, pwr_vals_a, P_after = _load_power(power_after_path)
+
+    t_win_str = (f"{power_t_start:.1f}–{power_t_end:.1f} s"
+                 if power_t_end < float("inf") else "all")
+    print(f"  Power window: {t_win_str}  "
+          f"({len(pwr_vals_b)} pts before"
+          + (f", {len(pwr_vals_a)} pts after" if pwr_vals_a is not None else "")
+          + ")")
 
     if power_use == "before":
         P_used = P_before
@@ -582,6 +598,8 @@ def plot_led_diagnostic(
     emission_after_path:  Optional[Path],
     power_before_path:    Path,
     power_after_path:     Optional[Path],
+    power_t_start:        float = 0.0,
+    power_t_end:          float = float("inf"),
 ) -> plt.Figure:
     """
     Stage-1 control figure: two side-by-side panels loaded straight from the
@@ -589,6 +607,7 @@ def plot_led_diagnostic(
 
       Left  – emission spectra (raw intensity_au, not normalised)
       Right – power time series (before + after overlayed; drift % in title)
+               Selected window is shaded; windowed mean shown as dashed line.
     """
     fig, (ax_em, ax_pw) = plt.subplots(1, 2, figsize=(10, 4))
 
@@ -611,25 +630,46 @@ def plot_led_diagnostic(
     ax_em.grid(True, alpha=0.3)
 
     # ── Right: power time series ───────────────────────────────────────────
+    use_window = not (power_t_start == 0.0 and power_t_end == float("inf"))
+
+    def _power_mean(t, p):
+        mask = (t >= power_t_start) & (t <= power_t_end)
+        return float(p[mask].mean()) if mask.any() else float(p.mean())
+
     pwr_df_b = pd.read_csv(power_before_path, comment="#")
     t_b      = pwr_df_b["time_s"].values.astype(float)
     p_b      = pwr_df_b["power_mW"].values.astype(float)
-    P_b_mean = float(p_b.mean())
+    P_b_mean = _power_mean(t_b, p_b)
     ax_pw.plot(t_b, p_b, color="#3a7ebf", linewidth=1.2, alpha=0.85, label="Before")
     ax_pw.axhline(P_b_mean, color="#3a7ebf", linewidth=1.0, linestyle="--",
-                  label=f"Mean = {P_b_mean:.4f} mW")
+                  label=f"Mean (window) = {P_b_mean:.4f} mW" if use_window
+                        else f"Mean = {P_b_mean:.4f} mW")
 
     drift_title = ""
     if power_after_path is not None and power_after_path.exists():
         pwr_df_a = pd.read_csv(power_after_path, comment="#")
         t_a      = pwr_df_a["time_s"].values.astype(float)
         p_a      = pwr_df_a["power_mW"].values.astype(float)
-        P_a_mean = float(p_a.mean())
+        P_a_mean = _power_mean(t_a, p_a)
         ax_pw.plot(t_a, p_a, color="#e87d37", linewidth=1.2, alpha=0.85, label="After")
         ax_pw.axhline(P_a_mean, color="#e87d37", linewidth=1.0, linestyle="--",
-                      label=f"Mean = {P_a_mean:.4f} mW")
+                      label=f"Mean (window) = {P_a_mean:.4f} mW" if use_window
+                            else f"Mean = {P_a_mean:.4f} mW")
         drift_pct  = (P_a_mean - P_b_mean) / P_b_mean * 100.0
         drift_title = f"  (drift = {drift_pct:+.2f} %)"
+
+    # Shade the selected time window
+    if use_window:
+        t_lo = power_t_start
+        t_hi = min(power_t_end, max(
+            t_b.max(),
+            pwr_df_a["time_s"].values.max()
+            if power_after_path is not None and power_after_path.exists() else t_b.max()
+        ))
+        ax_pw.axvspan(t_lo, t_hi, color="#ffdd57", alpha=0.15, label="Selected window")
+        ax_pw.axvline(t_lo, color="#ffdd57", linewidth=0.8, linestyle=":")
+        ax_pw.axvline(min(power_t_end, t_hi), color="#ffdd57",
+                      linewidth=0.8, linestyle=":")
 
     ax_pw.set_xlabel("Time (s)")
     ax_pw.set_ylabel("Power (mW)")

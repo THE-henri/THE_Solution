@@ -444,7 +444,7 @@ def run_half_life_fit(
     switch:         str,
     a_inf_mode:     str,          # "free" | "fixed" | "reference"
     a_inf_value:    float | None,
-    iqr_factor:     float,
+    iqr_factor:     float | None,
     temperature_c:  float,
 ) -> FitResult:
     """
@@ -500,15 +500,22 @@ def run_half_life_fit(
         return _blank("Initial fit failed.")
 
     # ── Outlier removal ───────────────────────────────────────────────
-    t_clean, ab_clean, inlier_mask = remove_outliers(
-        time_sel, abs_sel, curve_init, iqr_factor)
-    t_out  = time_sel[~inlier_mask]
-    ab_out = abs_sel[~inlier_mask]
-    n_excl = int((~inlier_mask).sum())
-
-    print(f"  {label}: outlier removal ({iqr_factor}×IQR) → "
-          f"{n_excl}/{len(inlier_mask)} points excluded "
-          f"({100*n_excl/len(inlier_mask):.1f}%)")
+    if iqr_factor is not None:
+        t_clean, ab_clean, inlier_mask = remove_outliers(
+            time_sel, abs_sel, curve_init, iqr_factor)
+        t_out  = time_sel[~inlier_mask]
+        ab_out = abs_sel[~inlier_mask]
+        n_excl = int((~inlier_mask).sum())
+        print(f"  {label}: outlier removal ({iqr_factor}×IQR) → "
+              f"{n_excl}/{len(inlier_mask)} points excluded "
+              f"({100*n_excl/len(inlier_mask):.1f}%)")
+    else:
+        t_clean, ab_clean = time_sel, abs_sel
+        inlier_mask = np.ones(len(time_sel), dtype=bool)
+        t_out  = time_sel[:0]
+        ab_out = abs_sel[:0]
+        n_excl = 0
+        print(f"  {label}: outlier removal disabled")
 
     if len(t_clean) < 2:
         return _blank("Too few points after outlier removal (need ≥ 2).")

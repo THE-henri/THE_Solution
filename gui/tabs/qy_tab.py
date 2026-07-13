@@ -1304,8 +1304,15 @@ class QuantumYieldTab(QWidget):
         self._stage4.add_widget(self._slopes_grp)
 
         self._qy_ref_edit = QLineEdit()
-        self._qy_ref_edit.setPlaceholderText("(optional) reference Φ_AB for fixed-BA fit")
+        self._qy_ref_edit.setPlaceholderText("(optional) reference Φ_AB")
         self._stage4.add_layout(_field_row("Reference Φ_AB:", self._qy_ref_edit, 160))
+
+        self._qy_ref_ba_edit = QLineEdit()
+        self._qy_ref_ba_edit.setPlaceholderText("(optional) reference Φ_BA  [AB_both / AB_thermal only]")
+        self._ref_ba_widget = QWidget()
+        self._ref_ba_widget.setLayout(_field_row("Reference Φ_BA:", self._qy_ref_ba_edit, 160))
+        self._ref_ba_widget.setVisible(False)
+        self._stage4.add_widget(self._ref_ba_widget)
 
         # Method selector — only visible for A_only case
         from PyQt6.QtWidgets import QWidget as _QWidget
@@ -1714,6 +1721,13 @@ class QuantumYieldTab(QWidget):
         if not thermal:
             self._kth_src_combo.setCurrentText("none")
 
+        # Reference Φ_BA: only shown for AB_both / AB_thermal
+        if hasattr(self, "_ref_ba_widget"):
+            _ab_case = text in ("AB_both", "AB_thermal")
+            self._ref_ba_widget.setVisible(_ab_case)
+            if not _ab_case:
+                self._qy_ref_ba_edit.clear()
+
         # Method selector: only shown for A_only (linearized alternative)
         if hasattr(self, "_method_row_widget"):
             self._method_row_widget.setVisible(text == "A_only")
@@ -2103,6 +2117,12 @@ class QuantumYieldTab(QWidget):
         if ref_text:
             try:
                 p.QY_AB_reference = float(ref_text)
+            except ValueError:
+                pass
+        ref_ba_text = self._qy_ref_ba_edit.text().strip()
+        if ref_ba_text and p.case in ("AB_both", "AB_thermal"):
+            try:
+                p.QY_BA_reference = float(ref_ba_text)
             except ValueError:
                 pass
 

@@ -703,6 +703,50 @@ class _LEDCharacterisationPanel(QWidget):
         row1.addStretch()
         self._stage2.add_layout(row1)
 
+        # Power time window
+        row1b = QHBoxLayout()
+        _twin_lbl = QLabel("Power time window")
+        _twin_lbl.setObjectName("pref_label")
+        _twin_hdr = QHBoxLayout()
+        _twin_hdr.setSpacing(4)
+        _twin_hdr.addWidget(_twin_lbl)
+        _twin_hdr.addWidget(InfoButton(
+            "Power time window",
+            "Select the portion of the power time series used to compute\n"
+            "the mean power for the photon flux calculation.\n\n"
+            "Set 'from' and 'to' to restrict the average to a stable region\n"
+            "(e.g. skip warm-up transients at the start or drift at the end).\n\n"
+            "If the window covers no data points the full series is used as a\n"
+            "fallback and a warning is printed."))
+        _twin_hdr.addStretch()
+        twin_col = QVBoxLayout()
+        twin_col.setSpacing(4)
+        twin_col.addLayout(_twin_hdr)
+        twin_inner = QHBoxLayout()
+        twin_inner.setSpacing(4)
+        twin_inner.addWidget(QLabel("from"))
+        self._pw_t_start = QDoubleSpinBox()
+        self._pw_t_start.setRange(0.0, 99999.0)
+        self._pw_t_start.setDecimals(1)
+        self._pw_t_start.setSuffix(" s")
+        self._pw_t_start.setValue(0.0)
+        self._pw_t_start.setMinimumWidth(90)
+        twin_inner.addWidget(self._pw_t_start)
+        twin_inner.addWidget(QLabel("to"))
+        self._pw_t_end = QDoubleSpinBox()
+        self._pw_t_end.setRange(0.0, 99999.0)
+        self._pw_t_end.setDecimals(1)
+        self._pw_t_end.setSuffix(" s")
+        self._pw_t_end.setValue(9999.0)
+        self._pw_t_end.setSpecialValueText("—  (all)")
+        self._pw_t_end.setMinimumWidth(90)
+        twin_inner.addWidget(self._pw_t_end)
+        twin_inner.addStretch()
+        twin_col.addLayout(twin_inner)
+        row1b.addLayout(twin_col)
+        row1b.addStretch()
+        self._stage2.add_layout(row1b)
+
         row2 = QHBoxLayout()
         self._threshold_spin = self._dspin_s2(
             row2, "Emission threshold\n(fraction of peak)", 0.0, 1.0, 0.005, 0.001, pref=True,
@@ -753,8 +797,13 @@ class _LEDCharacterisationPanel(QWidget):
             self._smooth_chk.stateChanged,
             self._sg_window.valueChanged,
             self._sg_order.valueChanged,
+            self._pw_t_start.valueChanged,
+            self._pw_t_end.valueChanged,
         ):
             sig.connect(self._mark_stale)
+
+        self._pw_t_start.valueChanged.connect(self._refresh_diagnostic)
+        self._pw_t_end.valueChanged.connect(self._refresh_diagnostic)
 
         self._stage2.set_status(READY)
         layout.addWidget(self._stage2)
@@ -937,7 +986,11 @@ class _LEDCharacterisationPanel(QWidget):
         em_a = Path(em_a_txt) if em_a_txt else None
         pw_a = Path(pw_a_txt) if pw_a_txt else None
         try:
-            fig = plot_led_diagnostic(em_b, em_a, pw_b, pw_a)
+            fig = plot_led_diagnostic(
+                em_b, em_a, pw_b, pw_a,
+                power_t_start=self._pw_t_start.value(),
+                power_t_end=self._pw_t_end.value(),
+            )
             self._diag_plot.set_figure(fig)
         except Exception as exc:
             print(f"[LED diagnostic] {exc}")
@@ -963,6 +1016,8 @@ class _LEDCharacterisationPanel(QWidget):
         smoothing    = self._smooth_chk.isChecked()
         sg_win       = self._sg_window.value()
         sg_ord       = self._sg_order.value()
+        pw_t_start   = self._pw_t_start.value()
+        pw_t_end     = self._pw_t_end.value()
 
         self._run_btn.setEnabled(False)
         self._save_btn.setEnabled(False)
@@ -982,6 +1037,8 @@ class _LEDCharacterisationPanel(QWidget):
             smoothing_order=sg_ord,
             integration_mode=mode,
             photon_flux_std_manual=std_manual,
+            power_t_start=pw_t_start,
+            power_t_end=pw_t_end,
         )
         self._worker.log_signal.connect(self.log_signal)
         self._worker.result_signal.connect(self._on_result)
@@ -1073,6 +1130,8 @@ class _LEDCharacterisationPanel(QWidget):
         self._sg_window.setValue(p.smoothing_window)
         self._sg_order.setValue(p.smoothing_order)
         self._std_spin.setValue(p.photon_flux_std_manual)
+        self._pw_t_start.setValue(p.power_t_start)
+        self._pw_t_end.setValue(p.power_t_end)
 
     def collect_prefs(self, prefs):
         prefs.led_characterisation.power_use              = self._pw_combo.currentText()
@@ -1082,6 +1141,8 @@ class _LEDCharacterisationPanel(QWidget):
         prefs.led_characterisation.smoothing_window       = self._sg_window.value()
         prefs.led_characterisation.smoothing_order        = self._sg_order.value()
         prefs.led_characterisation.photon_flux_std_manual = self._std_spin.value()
+        prefs.led_characterisation.power_t_start          = self._pw_t_start.value()
+        prefs.led_characterisation.power_t_end            = self._pw_t_end.value()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

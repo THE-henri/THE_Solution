@@ -1,0 +1,121 @@
+================================================================================
+  THE_Solution — TODO & Bug Tracker
+  Last updated: 2026-06-01
+================================================================================
+
+How to use this file
+--------------------
+  [ ] = open task / bug
+  [x] = done
+  [~] = in progress
+  Add notes with a leading ">" on the line below any item.
+  Add a date in parentheses when you spot or fix something: (2026-06-01)
+
+================================================================================
+  KNOWN BUGS
+================================================================================
+
+[ ] Preference parameters not restored correctly on load (2026-05-29)
+    > Many spin box / combo box values do not round-trip through prefs.json —
+    > after loading a saved preferences file, some fields show wrong values.
+    > Needs systematic check of collect_prefs / apply_prefs in every tab.
+
+[ ] Folder selections wired to wrong paths (2026-05-29)
+    > Some tabs receive raw_folder_changed or output_folder_changed from the
+    > wrong signal in main_window.py, causing them to operate on the wrong
+    > directory.  Check every signal connection in MainWindow._build_ui().
+
+[ ] Parameters tab is a placeholder — not yet implemented
+
+
+================================================================================
+  PER-WORKFLOW TASKS
+================================================================================
+
+── Extinction Coefficients ──────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (compound name, path length, solvent, T)
+[ ] Verify output folder wiring
+
+    Notes:
+    >
+
+
+── Spectra ──────────────────────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (all SpectraPrefs fields)
+[ ] Check raw folder wiring
+
+    Notes:
+    >
+
+
+── Half-Life (Kinetics) ─────────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (switch, a_inf_mode, iqr_factor, T)
+[ ] Verify output folder wiring
+
+    Notes:
+    >
+
+
+── Half-Life (Scanning) ─────────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs
+
+    Notes:
+    >
+
+
+── Thermal (Arrhenius / Eyring) ─────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (compound name, weighted_fit)
+[ ] Check compound_name signal wiring
+
+    Notes:
+    >
+
+
+── Actinometer ──────────────────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (all ActinometerPrefs fields)
+[ ] Verify raw folder and output folder wiring
+
+    Notes:
+    >
+
+
+── Quantum Yield ────────────────────────────────────────────────────────────
+
+[ ] Check apply_prefs / collect_prefs (all QuantumYieldPrefs fields)
+[ ] Verify raw folder and output folder wiring
+
+    Notes:
+    >
+
+
+── Spectral Editor ──────────────────────────────────────────────────────────
+
+[ ] No prefs yet — add if needed
+
+    Notes:
+    >
+
+
+── Handbook ─────────────────────────────────────────────────────────────────
+
+[ ] No prefs — no action needed
+
+    Notes:
+    >
+
+
+================================================================================
+  NOTES / IDEAS
+================================================================================
+
+>
+>
+>
+
+================================================================================

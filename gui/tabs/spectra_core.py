@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter1d
 
 
 # ── CSV loading ───────────────────────────────────────────────────────────────
@@ -289,6 +291,18 @@ def _run_pca_subset(sub, S_A, sb_tolerance):
     SB_s = S_A + sc * pc1
     alpha_min_s = float(1.0 - sc_lower / sc) if sc > 0 else np.nan
     return SB_s, alpha_min_s, sc
+
+
+# ── Smoothing helper ─────────────────────────────────────────────────────────
+
+def _smooth_spectrum(s: np.ndarray, method: str, window: int, polyorder: int) -> np.ndarray:
+    if method == "savitzky_golay":
+        w = window if window % 2 == 1 else window + 1
+        w = max(w, polyorder + 2)
+        return savgol_filter(s, window_length=w, polyorder=polyorder)
+    elif method == "gaussian":
+        return gaussian_filter1d(s, sigma=max(window, 1))
+    return s
 
 
 # ── Main extraction ───────────────────────────────────────────────────────────

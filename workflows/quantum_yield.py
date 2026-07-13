@@ -314,13 +314,16 @@ def load_kinetic_csv(filepath):
     """
     Load multi-wavelength kinetic CSV (same format as half_life_workflow.py).
     Row 0: channel labels (every 2 columns, e.g. "45C_672nm")
-    Row 1: "Time (sec)", "Abs" repeated per channel
+    Row 1: "Time (sec)" or "Time (min)", "Abs" repeated per channel
     Rows 2+: time / absorbance data pairs
-    Returns dict {label: (time_array, abs_array)}
+    Time is always returned in seconds.
+    Returns dict {label: (time_s_array, abs_array)}
     """
     MIN_VALID = 5
     raw = pd.read_csv(filepath, header=None)
-    label_row = raw.iloc[0]
+    label_row  = raw.iloc[0]
+    unit_str   = str(raw.iloc[1, 0]).strip().lower()
+    to_seconds = 60.0 if "min" in unit_str else 1.0
     data = raw.iloc[2:].reset_index(drop=True)
     channels = {}
     for i in range(0, data.shape[1] - 1, 2):
@@ -330,7 +333,7 @@ def load_kinetic_csv(filepath):
         valid = t_col.notna() & a_col.notna()
         if valid.sum() < MIN_VALID:
             continue
-        channels[label] = (t_col[valid].values, a_col[valid].values)
+        channels[label] = (t_col[valid].values * to_seconds, a_col[valid].values)
     return channels
 
 

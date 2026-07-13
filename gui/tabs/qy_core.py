@@ -65,12 +65,17 @@ def load_kinetic_csv(filepath: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]
     """
     Load multi-wavelength kinetic CSV.
     Row 0: channel labels (every 2 columns, e.g. "25C_672nm")
-    Row 1: "Time (sec)", "Abs" per channel
-    Returns dict {label: (time_array, abs_array)}.
+    Row 1: "Time (sec)" or "Time (min)", "Abs" per channel
+    Time is always returned in seconds.
+    Returns dict {label: (time_s_array, abs_array)}.
     """
     MIN_VALID = 5
     raw = pd.read_csv(filepath, header=None)
-    label_row = raw.iloc[0]
+    label_row  = raw.iloc[0]
+    unit_row   = raw.iloc[1]
+    # Detect time unit from the first header cell of row 1
+    unit_str   = str(unit_row.iloc[0]).strip().lower()
+    to_seconds = 60.0 if "min" in unit_str else 1.0
     data = raw.iloc[2:].reset_index(drop=True)
     channels = {}
     for i in range(0, data.shape[1] - 1, 2):
@@ -80,7 +85,8 @@ def load_kinetic_csv(filepath: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]
         valid = t_col.notna() & a_col.notna()
         if valid.sum() < MIN_VALID:
             continue
-        channels[label] = (t_col[valid].values, a_col[valid].values)
+        t_arr = t_col[valid].values * to_seconds
+        channels[label] = (t_arr, a_col[valid].values)
     return channels
 
 
@@ -463,6 +469,7 @@ class QYParams:
     QY_bounds_hi:         float = 1.0
     QY_unconstrained:       bool  = False
     QY_AB_reference:        Optional[float] = None
+    QY_BA_reference:        Optional[float] = None   # only used for AB_both / AB_thermal
     compute_initial_slopes: bool  = True
     n_initial_slopes_pts:   int   = 8
 
@@ -518,12 +525,14 @@ class QYFileResult:
     QY_slopes_raw:            list[float]    # raw Δabs/Δt slopes per monitoring λ
     n_initial_slopes_pts:     int
     irradiation_wavelength_nm: float
-    # reference fit curves (set when QY_AB_reference is not None)
+    # optional reference curves / LED arrays (all have defaults so they go last)
+    QY_BA_reference:          Optional[float] = field(default=None)
     abs_ref_per_wl: Optional[list] = field(default=None)
     # LED diagnostic arrays (set only when photon_flux_source == "led_spectrum")
     led_wl_arr:    Optional[np.ndarray] = field(default=None)
     led_N_arr:     Optional[np.ndarray] = field(default=None)
     led_eps_A_arr: Optional[np.ndarray] = field(default=None)
+    led_eps_B_arr: Optional[np.ndarray] = field(default=None)
     # PSS plateau results (set when case == "A_thermal_PSS" and plateaus used)
     pss_plateau_results: Optional[list] = field(default=None)
     scans_raw:           Optional[list] = field(default=None)
@@ -1289,7 +1298,8 @@ def run_qy_file(
         sigma_I0_AB_per_wl.append(si0_AB_j)
         sigma_total_per_wl.append(st_j)
         r2_per_wl.append(r2_j)
-        print(f"  λ={mon_wls[j]:.0f} nm: Φ_AB={QY_AB_j:.5f} "
+        _ba_str = (f"  Φ_BA={QY_BA_j:.5f}" if params.case in ("AB_both", "AB_thermal") else "")
+        print(f"  λ={mon_wls[j]:.0f} nm: Φ_AB={QY_AB_j:.5f}{_ba_str} "
               f"σ_total={st_j:.5f} R²={r2_j:.5f}")
 
     QY_AB_nom       = float(np.nanmean(QY_AB_per_wl))
@@ -1301,6 +1311,37 @@ def run_qy_file(
     _case_tag = params.case
     method = (f"ODE_lmfit_LED_full_{_case_tag}" if use_led_full
               else f"ODE_lmfit_{_case_tag}")
+
+    # ── Summary and PSS ───────────────────────────────────────────────────────
+    print(f"  Mean Φ_AB = {QY_AB_nom:.5f}  σ_total = {sigma_total_AB:.5f}  R² = {r2_mean:.5f}")
+    if params.case in ("AB_both", "AB_thermal"):
+        print(f"  Mean Φ_BA = {QY_BA_nom:.5f}")
+        _denom_photo = QY_AB_nom * eps_A_irr + QY_BA_nom * eps_B_irr
+        if _denom_photo > 0:
+            _f_B_photo = QY_AB_nom * eps_A_irr / _denom_photo
+            print(f"  PSS (photochemical, k_th=0): f_B = {_f_B_photo:.4f}  "
+                  f"({100*_f_B_photo:.1f}% B at PSS)")
+            if k_th > 0:
+                # Iterative PSS with thermal back-reaction (implicit in concentration)
+                _C_tot = conc_A_0 + conc_B_0
+                _l     = params.path_length_cm
+                _NV    = N_mol_s / V_L
+                _fB    = _f_B_photo
+                for _ in range(60):
+                    _A_pss = (eps_A_irr * (1 - _fB) + eps_B_irr * _fB) * _C_tot * _l
+                    _fac   = ((1 - 10**(-_A_pss)) / _A_pss
+                              if _A_pss > 1e-12 else np.log(10))
+                    _Ieff  = _NV * _l * _fac
+                    _d     = QY_BA_nom * eps_B_irr * _Ieff + k_th
+                    _fB_new = (QY_AB_nom * eps_A_irr * _Ieff / _d
+                               if _d > 0 else _fB)
+                    if abs(_fB_new - _fB) < 1e-9:
+                        break
+                    _fB = _fB_new
+                print(f"  PSS (incl. k_th = {k_th:.3e} s⁻¹): f_B = {_fB:.4f}  "
+                      f"({100*_fB:.1f}% B at PSS)")
+        else:
+            print("  PSS: Φ_AB·ε_A_irr + Φ_BA·ε_B_irr = 0 — cannot compute")
 
     # ── Initial slopes ────────────────────────────────────────────────────────
     if params.compute_initial_slopes:
@@ -1345,7 +1386,7 @@ def run_qy_file(
     for j in range(n_mon):
         td_ode = t_disp_ode(j)
         p_j  = make_params(); p_j["QY_AB"].set(value=QY_AB_per_wl[j], vary=False)
-        if params.case == "AB_both":
+        if params.case in ("AB_both", "AB_thermal"):
             p_j["QY_BA"].set(value=QY_BA_per_wl[j], vary=False)
 
         lo_val = (QY_AB_per_wl[j] - sigma_total_per_wl[j]
@@ -1356,6 +1397,9 @@ def run_qy_file(
                   else min(QY_AB_per_wl[j] + sigma_total_per_wl[j], params.QY_bounds_hi))
         p_hi = make_params(); p_hi["QY_AB"].set(value=hi_val, vary=False)
         p_lo = make_params(); p_lo["QY_AB"].set(value=lo_val, vary=False)
+        if params.case in ("AB_both", "AB_thermal"):
+            p_hi["QY_BA"].set(value=QY_BA_per_wl[j], vary=False)
+            p_lo["QY_BA"].set(value=QY_BA_per_wl[j], vary=False)
 
         abs_fit_per_wl.append(sim_curve(p_j,  td_ode, j))
         abs_fit_hi_per_wl.append(sim_curve(p_hi, td_ode, j))
@@ -1364,13 +1408,17 @@ def run_qy_file(
         td_abs = kin_t2d[disp_mask, j] if kin_t2d is not None else time_disp
         t_display_per_wl.append(td_abs)
 
-    # Reference curves (simulated with QY_AB_reference, fitted QY_BA)
+    # Reference curves (simulated with QY_AB_reference and optionally QY_BA_reference)
     abs_ref_per_wl = None
     if params.QY_AB_reference is not None:
         p_ref = make_params()
         p_ref["QY_AB"].set(value=params.QY_AB_reference, vary=False)
-        if params.case == "AB_both":
-            p_ref["QY_BA"].set(value=QY_BA_nom, vary=False)
+        if params.case in ("AB_both", "AB_thermal"):
+            _ref_ba = (params.QY_BA_reference
+                       if params.QY_BA_reference is not None else QY_BA_nom)
+            p_ref["QY_BA"].set(value=_ref_ba, vary=False)
+        else:
+            p_ref["QY_BA"].set(value=0.0, vary=False)
         abs_ref_per_wl = [sim_curve(p_ref, t_disp_ode(j), j) for j in range(n_mon)]
 
     # Residuals
@@ -1405,13 +1453,15 @@ def run_qy_file(
         time_s_fit=time_s_fit, fit_mask=fit_mask,
         t_display_per_wl=t_display_per_wl,
         QY_AB_reference=params.QY_AB_reference,
+        QY_BA_reference=params.QY_BA_reference,
         QY_slopes_raw=slopes_raw,
         n_initial_slopes_pts=params.n_initial_slopes_pts,
         irradiation_wavelength_nm=params.irradiation_wavelength_nm,
         abs_ref_per_wl=abs_ref_per_wl,
-        led_wl_arr=led_wl_arr if led_wl_arr is not None else None,
-        led_N_arr=led_N_arr if led_N_arr is not None else None,
-        led_eps_A_arr=led_eps_A_arr if use_led_full else None,
+        led_wl_arr=led_wl_arr,
+        led_N_arr=led_N_arr,
+        led_eps_A_arr=led_eps_A_arr,
+        led_eps_B_arr=led_eps_B_arr,
     )
 
 
@@ -1482,6 +1532,9 @@ def run_qy_linearized(
         raise ValueError(f"Unknown data_type: '{params.data_type}'")
 
     # Baseline correction (first-point only for linearized)
+    # Save initial absolute absorbance before subtraction — needed to restore
+    # the absolute scale when computing A_irr for the Katz linearization.
+    a_abs_0 = float(a_arr[0])
     a_arr = a_arr - a_arr[0]
 
     valid = ~np.isnan(a_arr)
@@ -1526,15 +1579,20 @@ def run_qy_linearized(
     # We estimate A0_mon from the first fit point before baseline subtraction;
     # for subtract_first_point mode A_mon(0) = eps_A_mon*[A]0*l at t=fit_start.
     # The ratio eps_A_irr/eps_A_mon converts to A_irr.
-    ratio = eps_A_irr / max(eps_A_mon, 1e-3)
-    A_irr = ratio * a_fit
+    # A_irr = ε_A_irr/ε_A_mon * A_mon_abs(t)
+    # A_mon_abs(t) = baseline-corrected trace + initial absolute absorbance
+    # (restores the absolute scale lost by the first-point subtraction).
+    ratio   = eps_A_irr / max(eps_A_mon, 1e-3)
+    A_irr   = ratio * (a_fit + a_abs_0)
 
     # Filter: A_irr must be > 0 for log10 to be defined
     valid2 = A_irr > 1e-6
     if valid2.sum() < 3:
         raise ValueError(
             "Too few A_irr > 0 points for linearization. "
-            "Check ε_A values and baseline correction.")
+            f"Initial A_mon = {a_abs_0:.4f}, ratio = {ratio:.4f}. "
+            "Check ε_A / ε_A_mon values, baseline correction, "
+            "and that the fit window starts before significant depletion.")
     t_lin   = t_fit[valid2] - t_fit[valid2][0]
     A_irr_v = A_irr[valid2]
     y       = np.log10(10.0 ** A_irr_v - 1.0)
@@ -1753,9 +1811,11 @@ def plot_qy_result(result: QYFileResult) -> Figure:
         ax.plot(result.time_s, result.abs_data[:, j], "-", color="#3a7ebf",
                 linewidth=1.8, label=f"Data  λ={wl_nm:.0f} nm")
         if len(result.abs_fit_per_wl) > j:
+            _is_ab_j = result.case in ("AB_both", "AB_thermal")
+            _ba_lbl  = (f"  Φ_BA={result.QY_BA_per_wl[j]:.4f}" if _is_ab_j else "")
             ax.plot(td_j, result.abs_fit_per_wl[j], "--", color="red",
                     linewidth=1.6,
-                    label=f"Fit  Φ_AB={result.QY_AB_per_wl[j]:.4f}  "
+                    label=f"Fit  Φ_AB={result.QY_AB_per_wl[j]:.4f}{_ba_lbl}  "
                           f"R²={result.r2_per_wl[j]:.4f}")
             ax.fill_between(td_j,
                             result.abs_fit_lo_per_wl[j],
@@ -1763,9 +1823,16 @@ def plot_qy_result(result: QYFileResult) -> Figure:
                             color="#e67e22", alpha=0.30, label="±σ_total")
         if (result.abs_ref_per_wl is not None
                 and j < len(result.abs_ref_per_wl)):
+            _ref_is_ab = result.case in ("AB_both", "AB_thermal")
+            _ref_ba_lbl = ""
+            if _ref_is_ab:
+                _ref_ba_val = (result.QY_BA_reference
+                               if result.QY_BA_reference is not None
+                               else result.QY_BA)
+                _ref_ba_lbl = f"  Φ_BA={_ref_ba_val:.4f}"
             ax.plot(td_j, result.abs_ref_per_wl[j], "-.", color="green",
                     linewidth=1.4,
-                    label=f"Ref  Φ_AB={result.QY_AB_reference:.4f}")
+                    label=f"Ref  Φ_AB={result.QY_AB_reference:.4f}{_ref_ba_lbl}")
         # Initial slope tangent
         if (result.QY_slopes_raw and j < len(result.QY_slopes_raw)
                 and not np.isnan(result.QY_slopes_raw[j])
@@ -1790,15 +1857,28 @@ def plot_qy_result(result: QYFileResult) -> Figure:
     if result.k_th > 0:
         lines.append(f"k_th = {result.k_th:.4e} s⁻¹")
     lines.append("")
+    _is_ab = result.case in ("AB_both", "AB_thermal")
     for j, wl_nm in enumerate(result.mon_wls):
+        _ba = (f"  Φ_BA={result.QY_BA_per_wl[j]:.4f}" if _is_ab else "")
         lines.append(
-            f"λ={wl_nm:.0f} nm: Φ_AB={result.QY_AB_per_wl[j]:.4f}  "
+            f"λ={wl_nm:.0f} nm: Φ_AB={result.QY_AB_per_wl[j]:.4f}{_ba}  "
             f"σ_total={result.sigma_total_per_wl[j]:.4f}  "
             f"R²={result.r2_per_wl[j]:.4f}")
     lines.append(f"Mean Φ_AB = {result.QY_AB:.4f}  σ_total = {result.QY_AB_sigma_total:.4f}")
+    if _is_ab:
+        lines.append(f"Mean Φ_BA = {result.QY_BA:.4f}")
+        _denom = result.QY_AB * result.eps_A_irr + result.QY_BA * result.eps_B_irr
+        if _denom > 0:
+            _fB_pss = result.QY_AB * result.eps_A_irr / _denom
+            lines.append(f"PSS f_B = {_fB_pss:.4f} ({100*_fB_pss:.1f}% B, k_th=0)")
     lines.append(f"R² (mean) = {result.r2:.4f}")
     if result.QY_AB_reference is not None:
         lines.append(f"Ref Φ_AB  = {result.QY_AB_reference:.4f}")
+        if result.case in ("AB_both", "AB_thermal"):
+            _ref_ba_ann = (result.QY_BA_reference
+                           if result.QY_BA_reference is not None else result.QY_BA)
+            lines.append(f"Ref Φ_BA  = {_ref_ba_ann:.4f}"
+                         + ("" if result.QY_BA_reference is not None else " (fitted)"))
     axes[0].text(0.97, 0.97, "\n".join(lines),
                  transform=axes[0].transAxes, fontsize=8,
                  verticalalignment="top", horizontalalignment="right",
@@ -1873,7 +1953,8 @@ def plot_qy_led_diagnostic(
     """
     led_wl  = result.led_wl_arr
     led_N   = result.led_N_arr
-    eps_A   = result.led_eps_A_arr   # None in scalar mode or when ε is manual
+    eps_A   = result.led_eps_A_arr
+    eps_B   = result.led_eps_B_arr
 
     if led_wl is None or led_N is None:
         fig = Figure(figsize=(6, 3))
@@ -1903,8 +1984,13 @@ def plot_qy_led_diagnostic(
     if eps_A is not None:
         ax_l2.plot(led_wl, eps_A, color="#4a7fd4", linewidth=1.8,
                    linestyle="--", label="ε_A(λ)")
-        ax_l2.set_ylabel("ε_A(λ)  (M⁻¹ cm⁻¹)", color="#4a7fd4")
-        ax_l2.tick_params(axis="y", labelcolor="#4a7fd4")
+        if eps_B is not None:
+            ax_l2.plot(led_wl, eps_B, color="#e07b39", linewidth=1.8,
+                       linestyle=":", label="ε_B(λ)")
+            ax_l2.set_ylabel("ε  (M⁻¹ cm⁻¹)")
+        else:
+            ax_l2.set_ylabel("ε_A(λ)  (M⁻¹ cm⁻¹)", color="#4a7fd4")
+            ax_l2.tick_params(axis="y", labelcolor="#4a7fd4")
         have_spec = True
     elif init_spec_wl is not None and init_spec_abs is not None:
         ax_l2.plot(init_spec_wl, init_spec_abs, color="#4a7fd4", linewidth=1.8,
@@ -1934,26 +2020,38 @@ def plot_qy_led_diagnostic(
     ax_r.grid(True, alpha=0.35)
 
     if eps_A is not None:
-        # Exact spectral absorbed flux
+        # Exact spectral absorbed flux for A
         A0_arr  = eps_A * result.conc_A_0 * result.path_length_cm
         fac_arr = np.where(A0_arr < 1e-10,
                            A0_arr * np.log(10.0),
                            1.0 - 10.0 ** (-A0_arr))
-        absorbed = led_N * fac_arr * 1e12   # pmol/s/nm
-        ax_r.fill_between(led_wl, absorbed, alpha=0.25, color="#c0392b")
-        ax_r.plot(led_wl, absorbed, color="#c0392b", linewidth=1.8,
-                  label="N(λ)·(1−10^(−ε_A·c₀·l))")
-        ax_r.set_ylabel("Absorbed photon flux  (pmol s⁻¹ nm⁻¹)", color="#c0392b")
-        ax_r.tick_params(axis="y", labelcolor="#c0392b")
+        absorbed_A = led_N * fac_arr * 1e12   # pmol/s/nm
+        ax_r.fill_between(led_wl, absorbed_A, alpha=0.20, color="#c0392b")
+        ax_r.plot(led_wl, absorbed_A, color="#c0392b", linewidth=1.8,
+                  label="N(λ)·(1−10^(−ε_A·c₀·l))  [A]")
+        N_abs_A = float(np.trapezoid(led_N * fac_arr, led_wl))
+        info_lines = [f"N_abs(A) = {N_abs_A:.4e} mol s⁻¹"]
+
+        if eps_B is not None:
+            # Also show ε_B absorbed flux (informational — uses same c₀ as proxy)
+            A0_B   = eps_B * result.conc_A_0 * result.path_length_cm
+            fac_B  = np.where(A0_B < 1e-10,
+                               A0_B * np.log(10.0),
+                               1.0 - 10.0 ** (-A0_B))
+            absorbed_B = led_N * fac_B * 1e12
+            ax_r.plot(led_wl, absorbed_B, color="#e07b39", linewidth=1.8,
+                      linestyle="--", label="N(λ)·(1−10^(−ε_B·c₀·l))  [B]")
+            N_abs_B = float(np.trapezoid(led_N * fac_B, led_wl))
+            info_lines.append(f"N_abs(B) = {N_abs_B:.4e} mol s⁻¹")
+
+        frac = N_abs_A / result.N_mol_s if result.N_mol_s > 0 else float("nan")
+        info_lines += [f"N_total  = {result.N_mol_s:.4e} mol s⁻¹",
+                       f"Abs. fraction (A) = {frac:.3f}"]
+        ax_r.set_ylabel("Absorbed photon flux  (pmol s⁻¹ nm⁻¹)")
         for wl in result.mon_wls:
             ax_r.axvline(wl, color="#e87040", linewidth=1.2, linestyle=":",
                          label="mon λ" if wl == result.mon_wls[0] else None)
-        N_abs = float(np.trapezoid(led_N * fac_arr, led_wl))
-        frac  = N_abs / result.N_mol_s if result.N_mol_s > 0 else float("nan")
-        ax_r.text(0.97, 0.97,
-                  f"N_abs  = {N_abs:.4e} mol s⁻¹\n"
-                  f"N_total = {result.N_mol_s:.4e} mol s⁻¹\n"
-                  f"Absorbed fraction = {frac:.3f}",
+        ax_r.text(0.97, 0.97, "\n".join(info_lines),
                   transform=ax_r.transAxes, fontsize=8,
                   va="top", ha="right",
                   bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
