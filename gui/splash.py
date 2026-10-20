@@ -4,6 +4,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+from app_info import APP_NAME, APP_SUBTITLE, __version__
+
 
 class SplashScreen(QDialog):
     """
@@ -14,9 +16,9 @@ class SplashScreen(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("QY Tool")
-        self.setMinimumSize(500, 400)
-        self.setMaximumSize(620, 500)
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(560, 560)
+        self.setMaximumSize(680, 720)
         self.setWindowFlags(
             Qt.WindowType.Dialog |
             Qt.WindowType.WindowCloseButtonHint
@@ -30,7 +32,7 @@ class SplashScreen(QDialog):
         layout.setSpacing(16)
 
         # Title
-        title = QLabel("QY Tool")
+        title = QLabel(APP_NAME)
         f = QFont()
         f.setPointSize(26)
         f.setBold(True)
@@ -39,7 +41,7 @@ class SplashScreen(QDialog):
         title.setObjectName("splash_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Quantum Yield & Photochemistry Analysis")
+        subtitle = QLabel(f"{APP_SUBTITLE}  ·  v{__version__}")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setObjectName("splash_subtitle")
         layout.addWidget(subtitle)
@@ -50,14 +52,22 @@ class SplashScreen(QDialog):
         layout.addWidget(sep)
 
         body = QLabel(
-            "This tool assists in the analysis of photoswitchable compounds, "
-            "including half-life determination, quantum yield calculation, "
-            "actinometry, extinction coefficient fitting, and thermal analysis "
-            "(Arrhenius / Eyring).\n\n"
-            "Raw data folders are read-only — the tool never modifies source files. "
-            "All results are written to the separately configured output folder.\n\n"
-            "Please set both folder paths before running any workflow."
+            f"<p>{APP_NAME} was developed in the <b>Hecht Lab</b> for the analysis of "
+            "UV/Vis spectroscopy data of photoswitchable compounds: extinction "
+            "coefficients, spectra, half-lives, Arrhenius / Eyring analysis, "
+            "actinometry and quantum yields.</p>"
+            "<p><b>Research use.</b> The program is intended for academic research. "
+            "It is licensed under the MIT License and provided \"as is\", without "
+            "warranty of any kind.</p>"
+            "<p><b>Your responsibility.</b> You are responsible for the data you "
+            "generate with this program. Critically check every fit, plot and "
+            "number before you use or publish it.</p>"
+            "<p>Raw data folders are read-only — the program never modifies source "
+            "files. All results are written to the output folder you select.</p>"
+            "<p>More information, including how to cite the program and the methods "
+            "it uses, can be found in the <b>Handbook → GENERAL</b> section.</p>"
         )
+        body.setTextFormat(Qt.TextFormat.RichText)
         body.setWordWrap(True)
         body.setAlignment(Qt.AlignmentFlag.AlignJustify | Qt.AlignmentFlag.AlignTop)
         body.setObjectName("splash_body")
@@ -75,8 +85,8 @@ class SplashScreen(QDialog):
         layout.addLayout(btn_row)
 
         note = QLabel(
-            "By continuing you confirm that this tool is used for research purposes "
-            "and is provided without warranty of any kind."
+            "By clicking \"I Agree\" you confirm that you have read and accept "
+            "these conditions."
         )
         note.setWordWrap(True)
         note.setAlignment(Qt.AlignmentFlag.AlignCenter)

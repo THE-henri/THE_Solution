@@ -431,6 +431,7 @@ class FitResult:
     k_linear:        Optional[float] = None
     t_half_linear:   Optional[float] = None
     r2_linear:       Optional[float] = None
+    a0_linear:       Optional[float] = None
 
 
 # ── Main fitting function ─────────────────────────────────────────────────
@@ -527,14 +528,17 @@ def run_half_life_fit(
     k_linear     = raw_result2[4] if len(raw_result2) > 4 else None
     t_half_lin   = raw_result2[5] if len(raw_result2) > 5 else None
     r2_linear    = raw_result2[6] if len(raw_result2) > 6 else None
+    a0_linear    = raw_result2[7] if len(raw_result2) > 7 else None
 
     if popt is None:
         return _blank("Final fit failed after outlier removal.")
 
-    print(f"  {label}: t½ = {t_half:.2f} s   R² (exp) = {r2:.6f}")
+    print(f"  {label}: A0 (exp) = {popt[0]:.6g}   t½ = {t_half:.2f} s   R² (exp) = {r2:.6f}")
     if k_linear is not None:
         r2_lin_str = f"{r2_linear:.6f}" if r2_linear is not None else "n/a"
-        print(f"  {label}: t½ (linear) = {t_half_lin:.2f} s   k (linear) = {k_linear:.6f} s⁻¹   R² (linear) = {r2_lin_str}")
+        a0_lin_str = f"{a0_linear:.6g}" if a0_linear is not None else "n/a"
+        print(f"  {label}: A0 (linear) = {a0_lin_str}   t½ (linear) = {t_half_lin:.2f} s   "
+              f"k (linear) = {k_linear:.6f} s⁻¹   R² (linear) = {r2_lin_str}")
 
     return FitResult(
         label=label, switch=switch, popt=popt, t_half=t_half,
@@ -549,6 +553,7 @@ def run_half_life_fit(
         k_linear=k_linear,
         t_half_linear=t_half_lin,
         r2_linear=r2_linear,
+        a0_linear=a0_linear,
     )
 
 

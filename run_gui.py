@@ -1,25 +1,28 @@
 """
-QY Tool — GUI entry point.
+THE_Solution — GUI entry point.
 
-Run from the QY_Tool directory:
+Run from the THE_Solution directory:
     python run_gui.py
 or with the venv active:
     .venv/Scripts/python run_gui.py
 """
 
 import sys
+import traceback
 from pathlib import Path
 
-# Ensure QY_Tool root is importable
+# Ensure THE_Solution root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib
 matplotlib.use("QtAgg")
 
-from PyQt6.QtWidgets import QApplication, QAbstractSpinBox
+from PyQt6.QtWidgets import QApplication, QAbstractSpinBox, QMessageBox
 from PyQt6.QtCore import QLocale, QObject, QEvent
+from PyQt6.QtGui import QIcon
 from gui.splash import SplashScreen
 from gui.main_window import MainWindow
+from app_info import APP_NAME, __version__, resource_path
 
 
 class _NoScrollSpinFilter(QObject):
@@ -31,8 +34,21 @@ class _NoScrollSpinFilter(QObject):
         return False
 
 
+def _excepthook(exc_type, exc, tb):
+    """Show unhandled errors instead of silently closing (the .exe has no console)."""
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    print(f"[ERROR] Unhandled exception:\n{text}")
+    if QApplication.instance() is not None:
+        box = QMessageBox(QMessageBox.Icon.Critical, f"{APP_NAME} — unexpected error",
+                          f"{exc_type.__name__}: {exc}\n\n"
+                          "The program will try to continue. Please report this "
+                          f"(with version {__version__}) if it keeps happening.")
+        box.setDetailedText(text)
+        box.exec()
+
+
 def _load_stylesheet(app: QApplication):
-    gui_dir = Path(__file__).resolve().parent / "gui"
+    gui_dir = resource_path("gui")
     qss = gui_dir / "style.qss"
     if qss.exists():
         assets = (gui_dir / "assets").as_posix()
@@ -41,8 +57,15 @@ def _load_stylesheet(app: QApplication):
 
 
 def main():
+    sys.excepthook = _excepthook
     app = QApplication(sys.argv)
-    app.setApplicationName("QY Tool")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    app.setWindowIcon(QIcon(str(resource_path("gui/assets/app_icon.png"))))
+    if sys.platform == "win32":
+        # own taskbar entry/icon instead of the generic python.exe one
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_NAME)
     QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
     _load_stylesheet(app)
     _scroll_filter = _NoScrollSpinFilter(app)

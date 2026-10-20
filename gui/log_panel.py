@@ -88,7 +88,7 @@ class LogPanel(QWidget):
             self._log_path_lbl.setText(f"Logging → {log_path}")
             # Write a header line so the file is non-empty from the start
             self._log_file.write(
-                f"# QY Tool session log  —  started {datetime.now().isoformat(timespec='seconds')}\n"
+                f"# THE_Solution session log  —  started {datetime.now().isoformat(timespec='seconds')}\n"
                 f"# Output folder: {output_path}\n"
                 "# ─────────────────────────────────────────────────────────\n"
             )

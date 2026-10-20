@@ -127,8 +127,10 @@ class QuantumYieldPrefs:
     k_th_temperature_C:        float = 25.0
     epsilon_source_A:          str   = "manual"
     epsilon_A_irr:             float = 10000.0
+    epsilon_A_mon:             Optional[float] = None
     epsilon_source_B:          str   = "manual"
     epsilon_B_irr:             float = 0.0
+    epsilon_B_mon:             Optional[float] = None
     QY_AB_init:                float = 0.1
     QY_BA_init:                float = 0.05
     wavelength_tolerance_nm:   float = 2.0

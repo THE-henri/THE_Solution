@@ -100,7 +100,7 @@ class FolderHeader(QGroupBox):
 
         self._compound_edit = QLineEdit()
         self._compound_edit.setPlaceholderText(
-            "e.g. AZA-SO2Me  —  used in plot titles and output filenames")
+            "COMPOUND-NAME  —  used in plot titles and output filenames")
         self._compound_edit.setMaximumWidth(360)
         self._compound_edit.textChanged.connect(self.compound_name_changed)
         row.addWidget(self._compound_edit)
@@ -183,3 +183,6 @@ class FolderHeader(QGroupBox):
     @property
     def compound_name(self) -> str:
         return self._compound_edit.text().strip()
+
+    def set_compound_name(self, name: str):
+        self._compound_edit.setText(name)

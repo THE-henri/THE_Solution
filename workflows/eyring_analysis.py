@@ -26,7 +26,7 @@ for folder in [EYRING_DIR, PLOTS_DIR]:
 # -------------------------
 # Workflow parameters          (all will become GUI inputs later)
 # -------------------------
-compound_name    = "AZA-SO2Me"   # used in plot titles and output filenames
+compound_name    = "COMPOUND-NAME"   # used in plot titles and output filenames
 weighted_fit     = True  # True = weighted by k std error; False = unweighted
 
 # -------------------------

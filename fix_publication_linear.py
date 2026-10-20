@@ -24,17 +24,16 @@ Note: A_inf is 0 in all these segments (positive switch or fixed A∞ = 0),
 so no A_inf correction is needed — the ln_A column is already correct.
 """
 
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 
 # ── Project roots ─────────────────────────────────────────────────────────────
-BASE = Path(r"c:\Users\StdUser\Documents\THE_Solution\data\Change_k_exp_to_linear_publication")
-PROJECT_ROOTS = [
-    BASE / "AZA-OMe",
-    BASE / "AZA-tBu",
-]
+# Pass one or more project output folders on the command line:
+#     python fix_publication_linear.py <project folder> [<project folder> ...]
+PROJECT_ROOTS = [Path(p) for p in sys.argv[1:]]
 
 
 # ── Core maths ────────────────────────────────────────────────────────────────
@@ -162,6 +161,8 @@ def parse_temp(name: str) -> float:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    if not PROJECT_ROOTS:
+        sys.exit("Usage: python fix_publication_linear.py <project folder> [...]")
     all_rows = []   # accumulated for final report
 
     for root in PROJECT_ROOTS:

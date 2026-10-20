@@ -1,5 +1,5 @@
 """
-Handbook tab — reference documentation for QY Tool methods and calculations.
+Handbook tab — reference documentation for THE_Solution methods and calculations.
 """
 
 from pathlib import Path
@@ -9,7 +9,9 @@ from PyQt6.QtWidgets import (
     QTextBrowser, QSplitter, QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QDesktopServices
+
+from app_info import APP_NAME, __version__, RELEASE_DATE
 
 
 # ── Colour palette (matches style.qss) ────────────────────────────────────────
@@ -159,8 +161,862 @@ _CSS = f"""
 
 # ── Section content ────────────────────────────────────────────────────────────
 
-_SECTIONS:     dict[str, str] = {}   # QY sections
-_SECTIONS_LED: dict[str, str] = {}   # LED / Actinometry sections
+_SECTIONS:              dict[str, str] = {}   # QY sections
+_SECTIONS_LED:          dict[str, str] = {}   # Actinometer sections (Chemical + LED)
+_SECTIONS_GENERAL:      dict[str, str] = {}
+_SECTIONS_EXTCOEFF:     dict[str, str] = {}
+_SECTIONS_HALFLIFE:     dict[str, str] = {}
+_SECTIONS_THERMAL:      dict[str, str] = {}
+_SECTIONS_SPECTRALEDIT: dict[str, str] = {}
+
+
+def _stub(title: str) -> str:
+    """Placeholder content for a section not yet written. See HANDBOOK_PROGRESS.md."""
+    return f"""
+<h1>{title}</h1>
+<p><i>This section hasn't been written yet — tracked in
+<code>HANDBOOK_PROGRESS.md</code> at the repo root.</i></p>
+"""
+
+
+# ── GENERAL (front matter — doesn't map to a program tab) ─────────────────────
+_SECTIONS_GENERAL["About This Program"] = f"""
+<h1>{APP_NAME}</h1>
+<p><i>Version {__version__} · released {RELEASE_DATE}</i></p>
+
+<p>
+{APP_NAME} is an analysis program for UV/Vis data of photoswitchable
+compounds. It covers the full characterisation chain from weighed-in samples
+to quantum yields, and writes every result (tables, plots, fit reports) to
+an output folder of your choice.
+</p>
+
+<h2>Workflows</h2>
+<p>The tabs are ordered roughly in the sequence in which a new compound is
+characterised. Later tabs can read results from earlier ones.</p>
+<table>
+  <tr><th>Tab</th><th>Purpose</th></tr>
+  <tr><td><b>Ext. Coeff.</b></td><td>Molar extinction coefficients ε(λ) from weighed-in
+      samples (Beer–Lambert).</td></tr>
+  <tr><td><b>Spectra</b></td><td>Spectrum of the photoproduct / PSS composition from
+      partially switched spectra.</td></tr>
+  <tr><td><b>Half-Life</b></td><td>Thermal back-reaction rate constants k and half-lives
+      t½ from kinetic or scanning-kinetic measurements.</td></tr>
+  <tr><td><b>Thermal</b></td><td>Arrhenius and Eyring analysis of k(T) → activation
+      parameters.</td></tr>
+  <tr><td><b>Actinometer</b></td><td>Photon flux of the irradiation setup from chemical
+      actinometry or LED characterisation.</td></tr>
+  <tr><td><b>Quantum Yield</b></td><td>Photoisomerisation quantum yields Φ from irradiation
+      kinetics (ODE fit or PSS method).</td></tr>
+  <tr><td><b>Parameters</b></td><td>Overview of shared parameters.</td></tr>
+  <tr><td><b>Spectral Editor</b></td><td>Cleaning, cropping, offsetting and combining raw
+      data files before analysis.</td></tr>
+</table>
+
+<h2>Folders &amp; preferences</h2>
+<ul>
+  <li><b>Raw data folder</b> — read-only. {APP_NAME} never modifies or deletes
+      your source files.</li>
+  <li><b>Output folder</b> — all results are written here.</li>
+  <li><b>Preferences</b> — the settings of all tabs can be saved to and loaded
+      from a <code>.json</code> file, so an analysis can be reproduced later.</li>
+</ul>
+
+<h2>Using results in publications</h2>
+<p>
+If results from {APP_NAME} appear in a thesis or publication, please cite the
+underlying methods listed under <b>Citations &amp; References</b> and state the
+program version you used (shown in the window title).
+</p>
+
+<div class="note">
+<b>Feedback &amp; bugs:</b> please report problems or wishes to Henri Tertilt
+(henri.tertilt@hu-berlin.de). Include the version number, the tab, and, if
+possible, the session log and the input file.
+</div>
+
+<div class="warn">
+{APP_NAME} is a research tool provided without warranty of any kind. Always
+check fits and plots for plausibility before using a number.
+</div>
+"""
+
+_SECTIONS_GENERAL["Citations & References"] = f"""
+<h1>Citations &amp; References</h1>
+
+<h2>How to cite {APP_NAME}</h2>
+<p>
+If you use {APP_NAME} for results in a publication or thesis, or if you
+reuse, adapt or build on its code — by hand or with AI tools — please cite:
+</p>
+<div class="note">
+H. Tertilt, <i>{APP_NAME}: Quantum Yield &amp; Photochemistry Analysis</i>,
+version {__version__}, Hecht Lab, {RELEASE_DATE[:4]}.
+<a href="https://github.com/THE-henri/THE_Solution">https://github.com/THE-henri/THE_Solution</a>
+</div>
+
+<p>
+{APP_NAME} also implements methods published by others. If you use the
+corresponding workflow for published results, cite the original work below
+as well.
+</p>
+
+<h2>Methods</h2>
+<ul>
+  <li><b>LED actinometry &amp; LED quantum-yield determination</b> (Actinometer → LED,
+      Quantum Yield) — the photokinetic model integrated over the full LED emission
+      spectrum builds on:<br>
+      A. Volker, J. D. Steen, S. Crespi, "A fiber-optic spectroscopic setup for isomerization quantum yield determination", <i>Beilstein J. Org. Chem.</i> <b>2024</b>, 20, 1684–1692. <a href="https://doi.org/10.3762/bjoc.20.150">doi:10.3762/bjoc.20.150</a></li>
+  <li><b>Chemical actinometers 1 and 2</b> (Actinometer tab) — wavelength-dependent
+      quantum yields Φ(λ) and reference absorption coefficients are taken from:<br>
+      T. Sumi, Y. Takagi, A. Yagi, M. Morimoto, M. Irie, "Photoirradiation wavelength dependence of cycloreversion quantum yields of diarylethenes", <i>Chem. Commun.</i> <b>2014</b>, 50, 3928–3930. <a href="https://doi.org/10.1039/c4cc00396a">doi:10.1039/c4cc00396a</a></li>
+</ul>
+
+<h2>Software</h2>
+<p>The numerical work is done with the following open-source libraries:</p>
+<ul>
+  <li><b>NumPy</b> — C. R. Harris <i>et al.</i>, "Array programming with NumPy",
+      <i>Nature</i> <b>2020</b>, 585, 357–362.
+      <a href="https://doi.org/10.1038/s41586-020-2649-2">doi:10.1038/s41586-020-2649-2</a></li>
+  <li><b>SciPy</b> (curve fitting, ODE integration, filtering) — P. Virtanen <i>et al.</i>,
+      "SciPy 1.0: fundamental algorithms for scientific computing in Python",
+      <i>Nat. Methods</i> <b>2020</b>, 17, 261–272.
+      <a href="https://doi.org/10.1038/s41592-019-0686-2">doi:10.1038/s41592-019-0686-2</a></li>
+  <li><b>LMFIT</b> (quantum-yield ODE fits) — M. Newville, T. Stensitzki, D. B. Allen,
+      A. Ingargiola, "LMFIT: Non-Linear Least-Square Minimization and Curve-Fitting
+      for Python", Zenodo, <b>2014</b>.
+      <a href="https://doi.org/10.5281/zenodo.11813">doi:10.5281/zenodo.11813</a></li>
+  <li><b>pandas</b> — W. McKinney, "Data Structures for Statistical Computing in
+      Python", <i>Proc. 9th Python in Science Conf.</i> <b>2010</b>, 56–61.
+      <a href="https://doi.org/10.25080/Majora-92bf1922-00a">doi:10.25080/Majora-92bf1922-00a</a></li>
+  <li><b>Matplotlib</b> — J. D. Hunter, "Matplotlib: A 2D Graphics Environment",
+      <i>Comput. Sci. Eng.</i> <b>2007</b>, 9, 90–95.
+      <a href="https://doi.org/10.1109/MCSE.2007.55">doi:10.1109/MCSE.2007.55</a></li>
+</ul>
+<p>The user interface is built with PyQt6 (Riverbank Computing) / Qt.</p>
+"""
+
+_SECTIONS_GENERAL["Version & Last Updated"] = f"""
+<h1>Version &amp; Release Notes</h1>
+
+<table>
+  <tr><th>Installed version</th><td><b>{__version__}</b></td></tr>
+  <tr><th>Released</th><td>{RELEASE_DATE}</td></tr>
+</table>
+
+<p>
+Version numbers follow <code>MAJOR.MINOR.PATCH</code>:
+</p>
+<ul>
+  <li><b>PATCH</b> (1.0.<b>x</b>) — bug fixes only.</li>
+  <li><b>MINOR</b> (1.<b>x</b>.0) — new features or handbook sections; existing
+      results are unchanged.</li>
+  <li><b>MAJOR</b> (<b>x</b>.0.0) — changes that can alter the numerical results of an
+      existing workflow. Re-check old analyses before comparing them with new ones.</li>
+</ul>
+
+<h2>Release notes</h2>
+
+<h3>1.0.0 — {RELEASE_DATE}</h3>
+<ul>
+  <li>First release for the group.</li>
+  <li>Workflows: extinction coefficients, spectra extraction, half-life (kinetic,
+      scanning, manual segments, publication export), Arrhenius/Eyring, chemical and
+      LED actinometry, quantum yield (one- and two-process cases, PSS method),
+      spectral editor.</li>
+  <li>Export to OriginPro (Half-Life publication data, Spectra A/B) with the
+      group's graph templates.</li>
+  <li>Parameters tab: overview of all saved preferences (current / loaded / default).</li>
+  <li>Ext. Coeff.: concentration can be entered directly when mass and volume
+      were not recorded.</li>
+  <li>The compound name is entered once in the header and used by all tabs.</li>
+  <li>In-app handbook covering all workflows.</li>
+</ul>
+"""
+
+# ── EXTINCTION COEFFICIENTS ─────────────────────────────────────────────────────
+_SECTIONS_EXTCOEFF["Extinction Coefficients — Overview"] = f"""
+<h1>Extinction Coefficients</h1>
+
+<p>
+Determines the molar extinction coefficient ε(λ) of a compound from UV-Vis
+absorbance spectra and a weighed-in concentration, via Beer–Lambert:
+</p>
+<pre class="eq">A = ε · c · l   ⟹   ε = A / (c · l)</pre>
+<p>
+where A is absorbance, c is concentration (mol/L), and l is the cuvette path
+length (cm). Units are M⁻¹ cm⁻¹.
+</p>
+
+<p>The tab has three stages:</p>
+<ul>
+  <li><b>Stage 1 — Preparations</b> — one table row per CSV file (one
+      "preparation"); enter the weighed mass, molar weight, and dissolution
+      volume for each.</li>
+  <li><b>Stage 2 — Parameters</b> — path length, solvent and temperature,
+      applied to every preparation in the run (the compound name comes from
+      the header).</li>
+  <li><b>Stage 3 — Run &amp; Results</b> — calculates ε(λ) for every
+      preparation, plots the per-preparation spectra plus the overall
+      mean ± std, and lets you save the result as a CSV.</li>
+</ul>
+
+<p>
+The output CSV is a direct input to the <b>Spectra</b> and
+<b>Quantum Yield</b> tabs downstream, so an error here (wrong weight,
+wrong MW, wrong path length) propagates into every quantum-yield fit that
+uses this compound's ε spectrum.
+</p>
+"""
+
+_SECTIONS_EXTCOEFF["Input Files & Weighing Data"] = f"""
+<h1>Extinction Coefficients — Input Files &amp; Weighing Data</h1>
+
+<p>Each file added in Stage 1 is one <b>preparation</b> — one weighed-in
+sample, one dissolution volume — and must be a Cary 60 CSV in column-pair
+format:</p>
+<pre class="eq">Row 0 : instrument header (skipped)
+Row 1+: Wavelength, Abs, Wavelength, Abs, …   (one pair per replicate scan)</pre>
+<p>
+A single file may contain several replicate scans as repeated
+Wavelength/Abs column pairs — these are treated as <i>replicates of the
+same preparation</i>, not separate preparations, and are averaged together
+after each is interpolated onto a common integer-nm wavelength grid.
+</p>
+
+<p>For every row in the Stage 1 table, either three numbers or a
+concentration are required before Run is enabled:</p>
+<ul>
+  <li><b>Weight (mg)</b> — mass of compound actually weighed in for that
+      preparation.</li>
+  <li><b>MW (g/mol)</b> — molar mass of the compound.</li>
+  <li><b>Volume (mL)</b> — total dissolution/dilution volume the weighed mass
+      was made up to.</li>
+  <li><b>or c (mol/L)</b> — <i>instead of</i> the three above, when mass and
+      volume were not recorded. If filled in, it is used even when the other
+      three fields are filled too. Rows of both kinds can be mixed.</li>
+</ul>
+<p>
+Concentration is computed per preparation as
+<code>c = (weight_mg × 10⁻³) / MW_gmol / (volume_mL × 10⁻³)</code> mol/L (or
+taken as entered), and used directly in the Beer–Lambert division — a typo in
+any of these fields silently shifts that preparation's whole ε spectrum up or
+down. A concentration entered directly is only as good as its source; note
+where it came from in your lab notebook.
+</p>
+
+<p>
+The wavelength grid used for the output is the union range across
+<i>all</i> loaded preparations, rounded outward to the nearest integer nm
+(floor of the lowest, ceiling of the highest) — each preparation's replicate
+scans are interpolated onto that common grid before averaging, so
+preparations recorded over different wavelength spans still combine
+correctly, with each preparation only contributing where it actually has
+data.
+</p>
+"""
+
+_SECTIONS_EXTCOEFF["Calculation & Output"] = f"""
+<h1>Extinction Coefficients — Calculation &amp; Output</h1>
+
+<h2>Two levels of averaging</h2>
+<p>
+Within a preparation, replicate scans are interpolated onto the common
+integer-wavelength grid and averaged to give that preparation's
+<code>PrepN_Mean</code> / <code>PrepN_Std</code>. Across preparations, the
+final <code>Mean</code> is the average of the preparations'
+<code>PrepN_Mean</code> values, and <code>Std</code> is the standard
+deviation <i>across those preparation means</i> — it does not fold in the
+within-preparation replicate spread (<code>PrepN_Std</code>) at all. With
+only one preparation loaded, <code>Std</code> is therefore always 0; the
+replicate spread is still visible per-preparation in
+<code>Prep1_Std</code>, just not propagated into the reported uncertainty.
+</p>
+
+<h2>Output CSV</h2>
+<pre class="eq">Wavelength (nm), Prep1_Mean, Prep1_Std, Prep2_Mean, Prep2_Std, …,
+Mean, Std, Compound, Solvent, Temperature_C, Path_length_cm, Date</pre>
+<p>
+Path length and temperature are the Stage 2 values applied uniformly to
+every preparation in the run — temperature is stored for traceability only
+and does not enter the ε calculation itself. <code>Compound</code> and
+<code>Solvent</code> are likewise recorded as plain metadata, read back by
+the Spectra and Quantum Yield tabs when this CSV is loaded there.
+</p>
+"""
+
+# ── HALF-LIFE ────────────────────────────────────────────────────────────────────
+_SECTIONS_HALFLIFE["Half-Life — Overview"] = f"""
+<h1>Half-Life</h1>
+
+<p>
+Fits first-order decay/build-up kinetics — A(t) relaxing toward a plateau A∞ —
+to extract a rate constant k and half-life t½ = ln(2)/k. Used for thermal
+back-isomerisation (photoswitch B→A in the dark) and any other single-exponential
+process monitored as absorbance vs. time.
+</p>
+
+<p>The tab has three sub-tabs:</p>
+<ul>
+  <li><b>Kinetics</b> — fit one file (one or more monitored wavelengths) over a
+      chosen time window. Supports manual re-fitting of multiple segments of
+      the same trace (e.g. successive photoswitching cycles).</li>
+  <li><b>Scanning Kinetics</b> — the multi-wavelength counterpart: extracts a
+      trace at each of several target wavelengths from a scanning-spectrometer
+      file and fits each independently.</li>
+  <li><b>Publication</b> — reload previously-saved master CSV rows and generate
+      publication-ready summary plots/tables across temperatures.</li>
+</ul>
+
+<h2>Basic workflow (Kinetics tab)</h2>
+<ul>
+  <li><b>Stage 1</b> — Load a Cary-style kinetic CSV; select which channel(s) to fit.</li>
+  <li><b>Stage 2</b> — Set the fit time window and outlier-removal settings.</li>
+  <li><b>Stage 3</b> — Choose the switch direction and how A∞ is determined.</li>
+  <li><b>Stage 4</b> — Choose exponential or linear as the reported fit; run.</li>
+  <li><b>Stage 5</b> — Inspect the two-panel plot (exponential fit + linearised
+      transform), then save the row to the master CSV and/or export the segment
+      for publication.</li>
+</ul>
+"""
+
+_SECTIONS_HALFLIFE["Loading Data & Channels"] = f"""
+<h1>Half-Life — Loading Data &amp; Channels</h1>
+
+<p>Expects Cary-style kinetic CSVs:</p>
+<pre class="eq">Row 0 : channel label , ""
+Row 1 : "Time (min)" / "Time (sec)" , "Abs"
+Row 2+: numeric time, absorbance data</pre>
+
+<p>
+One file can contain multiple channel blocks (e.g. several monitored
+wavelengths side by side); each is loaded as a separate selectable channel.
+Time is always treated internally in seconds — a "Time (min)" header is
+converted automatically. Time values in the file are <b>absolute</b>
+(experiment-clock) values, not re-zeroed to the start of each channel —
+this matters when reading segment window bounds like "Seg1 (2103–2190 s)"
+later in the workflow: those numbers are the file's own absolute time, not
+seconds-since-segment-start.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Fit Window & Outlier Removal (IQR)"] = f"""
+<h1>Half-Life — Fit Window &amp; Outlier Removal</h1>
+
+<p>
+Only the data between the chosen <code>t_start_s</code> and <code>t_end_s</code>
+is used for fitting. An initial fit is run on that window, then points whose
+residual falls outside <code>iqr_factor × IQR</code> of the residual
+distribution are flagged as outliers (shown as red × on the plot) and a
+final fit is re-run on the cleaned data only. Default is 3.0× IQR; outlier
+removal can be disabled entirely to fit every point in the window.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Switch Convention & A∞"] = f"""
+<h1>Half-Life — Switch Convention &amp; A∞</h1>
+
+<p>
+<b>Switch</b> describes which direction the trace moves, not literally the
+sign of the absorbance itself: <b>negative</b> means the trace generally
+approaches A∞ from a starting value on one side, <b>positive</b> the pure
+decay-to-a-baseline case. The underlying model is the same 3-parameter
+form for both:
+</p>
+<pre class="eq">A(t) = A∞ + (A0 − A∞)·e^(−kt)</pre>
+
+<h2>A∞ modes</h2>
+<ul>
+  <li><b>Free</b> — A∞ is fit alongside A0 and k (3-parameter <code>curve_fit</code>).</li>
+  <li><b>Fixed</b> — A∞ is a user-supplied constant (may be 0 for a pure decay
+      to baseline); A0 and k are then fit with A∞ held constant.</li>
+  <li><b>Reference</b> — A∞ is read from a separate reference measurement
+      (used in Scanning Kinetics) rather than entered manually.</li>
+</ul>
+"""
+
+_SECTIONS_HALFLIFE["Exponential vs. Linear Fit"] = f"""
+<h1>Half-Life — Exponential vs. Linear Fit</h1>
+
+<p>
+Every successful fit produces <i>both</i> an exponential result (non-linear
+least squares on A(t) directly) and a linear result (linear regression of
+ln|A−A∞| vs. t, valid once A∞ is known). A toggle in the GUI chooses which
+one gets saved as the reported <code>k</code> / <code>Half_life_s</code> /
+<code>R2</code> — and, as of this project, which one supplies the reported
+<code>A0</code> too (previously A0 was always taken from the exponential fit
+regardless of the toggle; a <code>Fit_Method</code> column now records which
+one was actually used, going forward).
+</p>
+
+<pre class="eq">y = ln|A0 − A∞| − k·t</pre>
+
+<p>
+<b>What A0 means:</b> both fit methods define A0 as the amplitude at the
+<i>start of the fitted time window</i> (t = <code>t_start_s</code>), not at
+the experiment's absolute t = 0. A segment starting far into a long trace
+(e.g. t ≈ 2000 s) will have a physically small A0 close to its own starting
+absorbance — extrapolating back to absolute t = 0 instead would require
+multiplying by <code>e^(k·t_start)</code>, which overflows to nonsense
+magnitudes for anything but a very early segment. If you see an
+astronomically large or small A0 in older saved data, this is almost always
+why — see Common Pitfalls.
+</p>
+
+<p>
+<b>Sign:</b> the linear regression uses ln|A0−A∞|, which loses the sign of
+the amplitude; it's recovered from the direction of the first data point in
+the window, so A0 can correctly come out below A∞ (a below-baseline trace)
+as well as above it.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Manual Segments"] = f"""
+<h1>Half-Life — Manual Segments</h1>
+
+<p>
+The Kinetics tab lets you re-run the fit on different time windows of the
+<i>same loaded file</i> and save each as a separate labelled row
+("Seg1 (t0–t1 s)", "Seg2 (...)", …) in the master CSV — useful for repeated
+photoswitching cycles recorded in one continuous trace. The segment label
+and time window are freely chosen each time you click Run; nothing
+auto-increments or auto-detects cycle boundaries.
+</p>
+
+<p>
+<b>Watch out:</b> the Temperature field (and any other per-run setting) is
+<i>not</i> tied to the loaded file — it's whatever the spinner currently
+shows. If you load a new file at a different temperature and forget to
+update it before running/saving, the saved row silently carries the stale
+value. See Common Pitfalls.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Scanning Kinetics"] = f"""
+<h1>Half-Life — Scanning Kinetics</h1>
+
+<p>
+For files where a full spectrum is recorded repeatedly over time (rather
+than a fixed set of discrete wavelength channels), Scanning Kinetics extracts
+an absorbance-vs-time trace at each of several target wavelengths (with a
+configurable tolerance) and fits each independently, reusing the same fit
+pipeline as the Kinetics tab underneath. A∞ can be taken from a separate
+reference scan/file rather than fit or fixed manually.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Publication Export & Master CSV"] = f"""
+<h1>Half-Life — Publication Export &amp; Master CSV</h1>
+
+<h2>Master CSV</h2>
+<p>
+<code>&lt;project&gt;/half_life/results/half_life_master.csv</code> accumulates
+one row per saved fit: <code>File, Segment, Wavelength, Type, Temperature_C,
+Switch, A0, A_inf, k, Half_life_s, R2, Fit_Method</code>. Rows saved before
+this project's fixes won't have a <code>Fit_Method</code> value — that's
+expected, not an error; it only gets populated going forward. This file is
+what the Thermal tab reads to build Arrhenius/Eyring plots (grouped by
+<code>Temperature_C</code>), so a wrong temperature here directly corrupts a
+downstream fit — see Common Pitfalls.
+</p>
+
+<h2>Publication folder structure</h2>
+<pre class="eq">&lt;project&gt;/half_life/results/publication/&lt;temperature&gt;C/
+  raw/                          full raw trace + detected segment list
+  segment_N[_channel]/          one saved segment/channel:
+    data_points.csv               time, absorbance, ln|A−A∞| — the exact
+                                   cleaned data that was fit
+    fit_line.csv                   smooth fitted line (ln-space)
+    fit_params.csv                  channel, k, t½, A0, A∞, R² (+ Fit_Method)
+  export/                       consolidated CSVs built by concatenating the
+                                 segment_N_* folders — regenerate this after
+                                 editing any fit_params.csv by hand</pre>
+
+<p>
+The temperature folder name is <i>not</i> derived from the data — it's
+whatever the Temperature field said when you saved, same caveat as segment
+labels above.
+</p>
+
+<h2>Export to Origin</h2>
+<p>
+Stage 5 → <b>Export to Origin…</b> writes the same data straight into an
+OriginPro project, either a new <code>.opju</code> or a new folder inside an
+existing one (close that project in Origin first). The folder contains:
+</p>
+<ul>
+  <li><b>Raw data</b> workbook — one sheet per raw file with time and
+      absorbance per channel, plus the segment tables.</li>
+  <li><b>Raw kinetic traces</b> graph — the absorbance exactly as measured
+      (no baseline subtraction); the fitted segments are shaded grey and the
+      time axis starts at 0. If the trace was not zeroed at the instrument,
+      adjust the y-axis title in Origin.</li>
+  <li><b>Segment N</b> workbooks and graphs — ln|A − A∞| data, fit line and a
+      <i>Fit parameters</i> sheet; the legend lists k, A0, A∞ and R² per channel.</li>
+</ul>
+<p>
+Graph styles come from the built-in templates (1 to 4 channels are picked
+automatically; with more than 4 channels the extra plots get Origin's default
+style). Axis ranges are rescaled to the data — small manual touch-ups in Origin
+are expected. Needs OriginPro 2021 or newer; without Origin you get a message
+and can use <b>Export CSV</b> instead.
+</p>
+"""
+
+_SECTIONS_HALFLIFE["Half-Life — Common Pitfalls"] = f"""
+<h1>Half-Life — Common Pitfalls</h1>
+
+<h2>Stale Temperature field</h2>
+<p>
+The single most consequential mistake this workflow makes easy: the
+Temperature spinner keeps whatever value it last had across file loads. If
+you finish fitting one temperature's files and load the next temperature's
+file without updating it first, every save (master CSV row <i>and</i>
+publication export) until you notice will be filed under the wrong
+temperature — including the publication folder name itself. This silently
+contaminates the Thermal tab's Arrhenius/Eyring grouping (a stray fast/slow
+k lands in the wrong temperature's average) and can leave the correct
+temperature's own publication folder missing that data entirely, since the
+save went to the wrong place instead. <b>Always check the Temperature field
+immediately after loading a new file, before running or saving anything.</b>
+</p>
+
+<h2>Astronomically large or small A0</h2>
+<p>
+Fixed by this project going forward (see Exponential vs. Linear Fit for
+why), but older saved data — master CSV rows and publication
+<code>fit_params.csv</code> files — may still show values like
+<code>-1e+50</code> for A0. k, A∞, R², and half-life are unaffected; only A0
+needs retroactive correction if you rely on it (e.g. for a figure caption).
+</p>
+
+<h2>No A0 from the linear fit, historically</h2>
+<p>
+Before this project, A0 in saved output was <i>always</i> the exponential
+fit's value, even when the "linear" toggle was selected for k/t½/R². The
+<code>Fit_Method</code> column (present on rows saved from now on) tells you
+which fit a given row's numbers actually came from.
+</p>
+"""
+
+# ── THERMAL ──────────────────────────────────────────────────────────────────────
+_SECTIONS_THERMAL["Overview (Arrhenius vs. Eyring)"] = f"""
+<h1>Thermal</h1>
+
+<p>
+Takes k(T) — a rate constant measured at several temperatures by the
+Half-Life tab — and fits the temperature dependence to extract activation
+parameters. Two equivalent models, two sub-tabs:
+</p>
+
+<table>
+  <tr><th>Sub-tab</th><th>Linearised form</th><th>Extracted parameters</th></tr>
+  <tr>
+    <td>Arrhenius</td>
+    <td><code>ln(k) = ln(A) − Ea/(R·T)</code></td>
+    <td>Ea (activation energy), A (pre-exponential factor)</td>
+  </tr>
+  <tr>
+    <td>Eyring</td>
+    <td><code>ln(k/T) = ln(kB/h) + ΔS‡/R − ΔH‡/(R·T)</code></td>
+    <td>ΔH‡ (activation enthalpy), ΔS‡ (activation entropy)</td>
+  </tr>
+</table>
+
+<p>
+Both fits also extrapolate k and t½ at 25&nbsp;°C (298.15 K) from the fitted
+line, so you get a room-temperature rate even if 25&nbsp;°C wasn't actually
+measured.
+</p>
+"""
+
+_SECTIONS_THERMAL["Input: Grouping k(T)"] = f"""
+<h1>Thermal — Input: Grouping k(T)</h1>
+
+<p>
+Both fits read directly from a Half-Life <code>half_life_master.csv</code>
+(needs at minimum the <code>Temperature_C</code> and <code>k</code>
+columns). Rows are grouped by exact <code>Temperature_C</code> value; each
+group's k values are averaged (mean ± SEM when the group has more than one
+row, since the SEM needs multiple points to compute). At least 2 distinct
+temperatures are required to fit a line at all.
+</p>
+
+<p>
+<b>Weighted fit:</b> a "weighted" option uses each temperature's own SEM as
+the fit weight (1/σ²-style), but only switches on automatically if
+<i>every</i> temperature group has more than one measurement — if even one
+temperature has only a single row (no SEM available), the fit silently
+falls back to unweighted for all points rather than partially weighting.
+</p>
+"""
+
+_SECTIONS_THERMAL["Arrhenius Fit & Output"] = f"""
+<h1>Thermal — Arrhenius Fit &amp; Output</h1>
+
+<pre class="eq">ln(k) = ln(A) − Ea/(R·T)</pre>
+
+<p>
+A straight-line fit of ln(k) vs. 1/T gives slope = −Ea/R and
+intercept = ln(A). Reported: Ea (kJ mol⁻¹) ± its fit uncertainty, A (s⁻¹)
+± its fit uncertainty, R² of the linear fit, and k / t½ extrapolated to
+25&nbsp;°C. The plot's x-axis is conventionally 1000/T (K⁻¹).
+</p>
+"""
+
+_SECTIONS_THERMAL["Eyring Fit & Output"] = f"""
+<h1>Thermal — Eyring Fit &amp; Output</h1>
+
+<pre class="eq">ln(k/T) = ln(kB/h) + ΔS‡/R − ΔH‡/(R·T)</pre>
+
+<p>
+A straight-line fit of ln(k/T) vs. 1/T gives slope = −ΔH‡/R and
+intercept = ln(kB/h) + ΔS‡/R (kB/h ≈ e²³·⁷⁶, a fixed constant, so ΔS‡ is
+recovered directly from the intercept). Reported: ΔH‡ (kJ mol⁻¹) and ΔS‡
+(J mol⁻¹ K⁻¹), each ± fit uncertainty, R², and k / t½ extrapolated to
+25&nbsp;°C.
+</p>
+"""
+
+_SECTIONS_THERMAL["Thermal — Common Pitfalls"] = f"""
+<h1>Thermal — Common Pitfalls</h1>
+
+<p>
+Because grouping is purely by the <code>Temperature_C</code> value in the
+master CSV, <b>a single mislabeled row silently contaminates whichever
+temperature group it lands in</b> — both its mean k and its SEM. A stray
+row from a fast (e.g. room-temperature) measurement accidentally saved
+under a cold temperature will pull that group's average up and, because
+mean and SEM are computed together, can produce a deceptively large error
+bar rather than an obviously wrong number — the mixed group's spread looks
+like "noisy data" rather than "wrong data." If a fitted Ea/ΔH‡ or its error
+bar looks larger than the individual per-temperature measurements would
+suggest, check the master CSV for a <code>Temperature_C</code> that doesn't
+match its own <code>File</code> name (see Half-Life → Common Pitfalls for
+how this mislabeling happens in the first place).
+</p>
+"""
+
+# ── SPECTRAL EDITOR ──────────────────────────────────────────────────────────────
+_SECTIONS_SPECTRALEDIT["Spectral Editor — Overview"] = f"""
+<h1>Spectral Editor</h1>
+
+<p>
+A general-purpose tool for touching up kinetic or scanning-kinetic CSVs
+before they're used elsewhere in the program — deleting bad channels/scans,
+correcting a baseline offset, retiming a trace, or stitching several files
+into one. It doesn't fit anything; it only transforms data and writes new
+CSVs in the same formats the other tabs already read.
+</p>
+
+<p>The tab has two independent sub-tabs, one per data shape:</p>
+<ul>
+  <li><b>Kinetic</b> — multi-channel absorbance-vs-time CSVs (the same
+      format Half-Life's Kinetics tab loads).</li>
+  <li><b>Scanning Kinetic</b> — Cary 60 multi-scan files, a list of
+      wavelength spectra taken at successive times (the same format
+      Half-Life's Scanning Kinetics and the Spectra tab load).</li>
+</ul>
+
+<h2>Shared model: files, history, undo</h2>
+<p>
+Each loaded file becomes an independent entry with its own <b>original</b>
+snapshot and <b>history</b> stack. Every operation button applies to
+<i>all currently loaded files at once</i> — there's no per-file selection
+for which files an operation targets, only which channels/scans/indices
+within them. A file added after others already have edits applied starts
+fresh from its own original state; earlier operations are not retroactively
+applied to it. <b>Undo</b> pops one step off that file's history (one
+operation at a time, per file); <b>Reset</b> clears the whole history and
+returns to the original load. Nothing is written to disk until you
+explicitly Save — all of this happens in memory.
+</p>
+"""
+
+_SECTIONS_SPECTRALEDIT["Kinetic Editor"] = f"""
+<h1>Spectral Editor — Kinetic Editor</h1>
+
+<h2>Delete Channels</h2>
+<p>
+Lists every channel label seen across all loaded files; checking one and
+applying removes that label from every file that has it.
+</p>
+
+<h2>Offset</h2>
+<p>
+Shifts each channel so a chosen <b>reference point</b> becomes a chosen
+<b>target value</b> — this is an absolute target, not a delta added to the
+trace: the whole channel is shifted by whatever amount makes the reference
+point land exactly on the target.
+</p>
+<pre class="eq">A_new(t) = A(t) − A_ref + target</pre>
+<p>
+Reference point is either <b>t = 0</b> (literally the first data point
+currently in the array — if the trace was already time-shifted or
+segment-cropped, "first point" moves with it) or a <b>plateau mean</b> over
+a chosen time window, averaged from whatever points fall inside
+<code>[t0, t1]</code>.
+</p>
+<p>
+Target is either a <b>manual value</b> you type in, or read from an
+<b>initial spectrum file</b>: each channel's label is parsed for a
+wavelength (a number followed by "nm", or else a trailing number in the
+label) and matched against the spectrum within ±2 nm. <b>A channel whose
+label doesn't parse to a wavelength, or has no match within tolerance, is
+silently left unchanged</b> — no warning is raised for that channel, so a
+misnamed channel (e.g. missing "nm") can look like the offset "didn't
+apply" with no error to explain why.
+</p>
+
+<h2>Time Axis</h2>
+<ul>
+  <li><b>Shift</b> — adds a constant (seconds) to every time value.</li>
+  <li><b>Rescale</b> — multiplies every time value by a factor; a factor of
+      exactly 0 is rejected with an error (everything else, including
+      negative factors, is allowed and will reverse the trace's direction).</li>
+</ul>
+
+<h2>Combine All Loaded Files</h2>
+<p>
+Combining <i>replaces</i> the whole loaded-file list with one new merged
+entry — there's no way to combine a subset while keeping the rest
+separate; remove files first if you don't want them included.
+</p>
+<ul>
+  <li><b>Side by side</b> — merges channels from every file into one file.
+      A duplicate label (same channel name in two files) is kept, not
+      overwritten — it's renamed <code>label_1</code>, <code>label_2</code>, …
+      so both survive.</li>
+  <li><b>Concatenate</b> — joins each channel's time series end-to-end
+      across files. <b>Only channels present in the first-loaded file are
+      kept</b> — a channel that exists solely in a later file is silently
+      dropped, not appended as a new column. <b>Auto join</b> starts each
+      subsequent file's segment right after the previous one's last time
+      point (re-zeroing that file's own time to start at 0 first);
+      <b>Join at</b> instead places every subsequent file's start at one
+      manually chosen absolute time, so multiple files after the first all
+      land at the same join point rather than chaining sequentially.</li>
+</ul>
+
+<h2>Save</h2>
+<p>
+Writes the same multi-channel column-pair CSV format Half-Life's Kinetics
+tab reads (channel label header row, then "Time (sec)"/"Abs" pairs), so
+edited files can be fed straight back into the rest of the program.
+</p>
+"""
+
+_SECTIONS_SPECTRALEDIT["Scanning Kinetic Editor"] = f"""
+<h1>Spectral Editor — Scanning Kinetic Editor</h1>
+
+<h2>Delete Scans</h2>
+<p>
+Scans are selected two ways at once — a checklist (toggle individual scans,
+or Select all/none) and a typed index range (e.g. <code>0, 2, 5-10</code>)
+— and the two selections are unioned before deleting. Indices are applied
+per file by position: deleting "scan 8" removes the 9th scan (0-indexed)
+from <i>every</i> loaded file, out-of-range indices for a shorter file are
+silently skipped rather than erroring. If your loaded files don't have the
+same number of scans (or the same scan times), index-based deletion can
+remove physically different scans from each file even though the index
+looks the same — there's no time/wavelength-aware matching here.
+</p>
+
+<h2>Offset</h2>
+<p>
+<b>Manual value</b> adds a constant to every scan's absorbance, uniformly
+across all wavelengths and all scans. <b>Initial spectrum file</b> instead
+computes a per-wavelength correction from just the <i>first</i> scan —
+interpolating the reference spectrum onto the first scan's wavelength grid
+and taking the difference — and then applies that same fixed delta array to
+every other scan in the file, interpolated onto each scan's own grid if it
+differs. It is a one-time baseline correction anchored to the first scan,
+not a per-scan re-alignment.
+</p>
+
+<h2>Align at Wavelength</h2>
+<p>
+A simpler, scalar version of Offset: shifts each scan by a single number so
+its absorbance at one chosen wavelength (±2 nm, averaged if several points
+fall in that window) matches a target — either the <b>first scan's value</b>
+at that wavelength, or <b>zero</b>. Unlike the spectrum-file Offset above,
+every scan gets its own independently-computed shift.
+</p>
+
+<h2>Normalize at Wavelength</h2>
+<p>
+Divides each selected scan's entire spectrum by its own absorbance value at
+the chosen wavelength. Selection is either "all scans" or a typed index
+range. A scan whose value at that wavelength is effectively zero
+(&lt; 1e-10) is left unmodified rather than dividing by (near-)zero — this
+happens silently, so a normalization wavelength sitting in a trough can
+quietly skip some scans.
+</p>
+
+<h2>Combine All Loaded Files</h2>
+<p>
+Concatenates the scan lists of all loaded files in load order (file 1's
+scans, then file 2's, …) into one new file, replacing the loaded list —
+no alignment or deduplication of scans, just appended one after another.
+</p>
+
+<h2>Save</h2>
+<p>
+Writes the same Cary 60 multi-scan CSV format (per-scan
+Wavelength/Abs column pairs) that the Spectra and Half-Life Scanning
+Kinetics tabs read, so edited files plug back into the rest of the program.
+</p>
+"""
+
+# ── ACTINOMETER: Chemical (LED sections are populated further down, keeping
+# Chemical first in dict order to match the tab's own sub-tab order) ───────────
+_SECTIONS_LED["Chemical Actinometry — Overview"] = f"""
+<h1>Chemical Actinometry</h1>
+
+<p>
+The simpler, classical alternative to LED Actinometry: irradiate a built-in
+reference actinometer with the light source at a chosen wavelength, and fit
+its bleaching kinetics to get photon flux N (mol photons s⁻¹) directly —
+no LED spectrum or power meter needed. Two actinometers are currently
+defined in-app, each specified by a valid wavelength range, a
+literature-derived quantum-yield formula QY(λ), and a reference
+absorption coefficient. Results save to the same
+<code>photon_flux_master.csv</code> the Quantum Yield tab reads photon
+flux from, so this is an alternative source for that value, not a
+separate downstream quantity.
+</p>
+
+<h2>Method</h2>
+<p>
+This uses the classical Parker linearisation (see LED Actinometry → Physics
+&amp; ODE for why it's only valid for monochromatic irradiation) — the same
+approximation that's exact here, unlike for a polychromatic LED:
+</p>
+<pre class="eq">y(t) = log₁₀(10^A(t) − 1) − log₁₀(10^A₀ − 1) = (N·QY·ε·l / V) · t</pre>
+
+<p>
+ε at the irradiation wavelength isn't supplied separately — it's derived
+from the actinometer's <i>own</i> measured spectrum, as the ratio of
+absorbance at the irradiation wavelength to absorbance at a fixed reference
+wavelength, scaled by that actinometer's known ε at the reference point:
+</p>
+<pre class="eq">ε_irr = ε_ref · (A_irr / A_ref)</pre>
+
+<h2>Data &amp; workflow</h2>
+<p>
+Input is a multi-scan Cary 60 CSV; scans are grouped (<code>scans_per_group</code>
+consecutive scans per irradiation-time step), and the group-averaged
+absorbance at the irradiation wavelength at each step becomes one point of
+y(t). A free-intercept linear fit of y vs. t gives the slope directly as
+photon flux N, with its standard error and R² reported alongside.
+</p>
+
+<div class="note">
+<b>Reference:</b> the QY(λ) formulae and ε_ref values of both built-in
+actinometers are taken from T. Sumi, Y. Takagi, A. Yagi, M. Morimoto, M. Irie, "Photoirradiation wavelength dependence of cycloreversion quantum yields of diarylethenes", <i>Chem. Commun.</i> <b>2014</b>, 50, 3928–3930. <a href="https://doi.org/10.1039/c4cc00396a">doi:10.1039/c4cc00396a</a> Please cite this work when you report
+photon fluxes determined with them.
+</div>
+"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 _SECTIONS["Quantum Yield — Overview"] = f"""
@@ -900,7 +1756,7 @@ not absorb at the irradiation wavelength, the rate equation is:
 least-squares minimisation (lmfit) of the residuals between simulated and
 measured absorbance traces.  Total uncertainty: σ_total = √(σ_fit² + σ_I₀²).
 </pre>
-<a class="save-link" href="save_word:///A_only">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///A_only">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -959,7 +1815,7 @@ The ODE was integrated numerically; Φ_AB was determined by Levenberg–Marquard
 least-squares minimisation with k_th held fixed.
 σ_total = √(σ_fit² + σ_I₀²).
 </pre>
-<a class="save-link" href="save_word:///A_only_thermal">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///A_only_thermal">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -1008,7 +1864,7 @@ absorbance data at [MONITORING WAVELENGTH(S)] nm.  Solutions in [SOLVENT] at
 with F(t) = (1−10^(−A_tot(t)))/A_tot(t).  Φ_AB and Φ_BA were extracted by
 Levenberg–Marquardt minimisation; uncertainties σ_total = √(σ_fit² + σ_I₀²).
 </pre>
-<a class="save-link" href="save_word:///AB_both">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///AB_both">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -1054,7 +1910,7 @@ equations are:
 k_th was held fixed; Φ_AB and Φ_BA were the free parameters in the
 Levenberg–Marquardt fit.  σ_total = √(σ_fit² + σ_I₀²).
 </pre>
-<a class="save-link" href="save_word:///AB_thermal">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///AB_thermal">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -1102,7 +1958,7 @@ with k_th = [VALUE] s⁻¹ (t½ = [VALUE] s at [TEMPERATURE] °C, from independe
 half-life measurements), N = [VALUE] mol s⁻¹, [B]_PSS = [VALUE] mol L⁻¹,
 A_PSS = [VALUE] (absorbance at irradiation wavelength at PSS), and V = [VALUE] L.
 </pre>
-<a class="save-link" href="save_word:///A_thermal_PSS">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///A_thermal_PSS">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -1196,7 +2052,7 @@ ordinary linear regression.  Photon flux N = [VALUE] mol s⁻¹ (from [METHOD]);
 ε_A_irr = [VALUE], ε_A_mon = [VALUE] M⁻¹ cm⁻¹.
 σ_total = √(σ_fit² + σ_I₀²).
 </pre>
-<a class="save-link" href="save_word:///A_only_linearized">⬇ Save as Word document…</a>
+<a class="save-link" href="save-word:///A_only_linearized">⬇ Save as Word document…</a>
 </div>
 """
 
@@ -1263,8 +2119,8 @@ comparison at the end.
   </tr>
 </table>
 <p>
-QY(λ) formulae are empirical fits from the actinometer literature valid within
-the stated wavelength range.  LED wavelengths outside that range are assigned
+QY(λ) formulae and ε_ref values are taken from T. Sumi, Y. Takagi, A. Yagi, M. Morimoto, M. Irie, "Photoirradiation wavelength dependence of cycloreversion quantum yields of diarylethenes", <i>Chem. Commun.</i> <b>2014</b>, 50, 3928–3930. <a href="https://doi.org/10.1039/c4cc00396a">doi:10.1039/c4cc00396a</a>. They are only valid
+within the stated wavelength range.  LED wavelengths outside that range are assigned
 QY = 0 and excluded from the spectral integration.
 </p>
 
@@ -1490,14 +2346,14 @@ A standard Cary 60 full-spectrum scan CSV of the actinometer solution
 <h3>Key Parameters</h3>
 <table>
   <tr><th>Parameter</th><th>Meaning</th><th>Typical value</th></tr>
-  <tr><td>Volume (mL)</td><td>Actinometer solution volume in cuvette</td><td>3.0 mL</td></tr>
+  <tr><td>Volume (mL)</td><td>Actinometer solution volume in cuvette</td><td>2.0 mL</td></tr>
   <tr><td>Path length (cm)</td><td>Optical path of the cuvette</td><td>1.0 cm</td></tr>
   <tr><td>Fit start / end (s)</td><td>Restrict the kinetic window used for fitting.
       Set to 0 to use all data.</td><td>0 / 0</td></tr>
   <tr><td>Monitoring wavelength (nm)</td><td>Override for single-channel kinetic files
       with no wavelength in the header.  Set to 0 for auto-detect.</td><td>0 (auto)</td></tr>
   <tr><td>Wavelength tolerance (nm)</td><td>Search window for extracting absorbance
-      at a target wavelength from the spectrum.</td><td>2.0 nm</td></tr>
+      at a target wavelength from the spectrum.</td><td>1.0 nm</td></tr>
 </table>
 
 <h2>Results</h2>
@@ -1797,8 +2653,8 @@ from UV/Vis spectra recorded during irradiation, given the pure spectrum of spec
   <li><b>Stage 1</b> — Load initial spectrum CSV (pure A) and, depending on mode,
       an irradiation series and/or PSS spectrum CSV(s).  Click <b>Load &amp; Preview</b>.</li>
   <li>Use the checklist to enable/disable individual irradiation spectra.</li>
-  <li><b>Stage 2</b> — Select mode, set compound name and concentration,
-      configure mode-specific parameters.</li>
+  <li><b>Stage 2</b> — Select mode, set the concentration and configure
+      mode-specific parameters (the compound name comes from the header).</li>
   <li><b>Stage 3</b> — Click <b>Run Extraction</b>.  View the extracted S_B spectrum
       with uncertainty band; optionally enable diagnostic plots.</li>
   <li>Save the result CSV for use in the Extinction Coefficient or QY tabs.</li>
@@ -1810,6 +2666,31 @@ from UV/Vis spectra recorded during irradiation, given the pure spectrum of spec
   …</pre>
 <p>Header rows starting with <code>#</code> record the extraction parameters for
 traceability.
+</p>
+
+<h2>Uncertainty of S_B</h2>
+<table>
+  <tr><th>Mode</th><th>Species_B_lo / _hi</th></tr>
+  <tr><td><code>negative</code></td><td>S_B ± 1σ — spread of the individual B
+      estimates over the irradiation series (single-PSS path: σ propagated from
+      the noise of α)</td></tr>
+  <tr><td><code>negative_pca</code>, <code>positive_pca</code></td><td>95 %
+      bootstrap confidence interval (2.5th / 97.5th percentile)</td></tr>
+  <tr><td><code>positive_pss</code></td><td>S_B computed with f_B ± its error</td></tr>
+</table>
+<p>
+S_A carries no uncertainty, and the uncertainty of the concentration (when
+converting to ε) is <i>not</i> propagated into either spectrum.
+</p>
+
+<h2>Export to Origin</h2>
+<p>
+Stage 3 → <b>Export to Origin…</b> writes A, B, the lower/upper bounds and
+the error column into an OriginPro project (new, or as a new folder in an
+existing one), with a graph from the built-in ε template: A, B and B's
+uncertainty as a shaded band. The y axis reads ε when a concentration was
+given, otherwise Absorbance. If smoothing is switched on, the smoothed
+spectra are exported — the same as displayed. Needs OriginPro 2021 or newer.
 </p>
 
 <div class="note">
@@ -2038,7 +2919,9 @@ class HandbookTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sections_map: dict[str, str] = {}
-        for d in (_SECTIONS, _SECTIONS_LED, _SECTIONS_SPECTRA):
+        for d in (_SECTIONS, _SECTIONS_LED, _SECTIONS_SPECTRA, _SECTIONS_GENERAL,
+                  _SECTIONS_EXTCOEFF, _SECTIONS_HALFLIFE, _SECTIONS_THERMAL,
+                  _SECTIONS_SPECTRALEDIT):
             self._sections_map.update(d)
         self._build_ui()
         top = self._nav.topLevelItem(0)
@@ -2077,9 +2960,14 @@ class HandbookTab(QWidget):
                 child.setText(0, f"  {title}")
                 child.setData(0, Qt.ItemDataRole.UserRole, title)
 
+        _add_group("GENERAL", _SECTIONS_GENERAL)
+        _add_group("EXTINCTION COEFFICIENTS", _SECTIONS_EXTCOEFF)
+        _add_group("SPECTRA", _SECTIONS_SPECTRA)
+        _add_group("HALF-LIFE", _SECTIONS_HALFLIFE)
+        _add_group("THERMAL", _SECTIONS_THERMAL)
+        _add_group("ACTINOMETER", _SECTIONS_LED)
         _add_group("QUANTUM YIELD", _SECTIONS)
-        _add_group("LED / ACTINOMETRY", _SECTIONS_LED)
-        _add_group("SPECTRA EXTRACTION", _SECTIONS_SPECTRA)
+        _add_group("SPECTRAL EDITOR", _SECTIONS_SPECTRALEDIT)
 
         self._nav.currentItemChanged.connect(self._on_nav_changed)
 
@@ -2155,9 +3043,11 @@ class HandbookTab(QWidget):
             self._browser.verticalScrollBar().setValue(0)
 
     def _on_anchor_clicked(self, url: QUrl):
-        if url.scheme() == "save_word":
+        if url.scheme() == "save-word":
             case = url.path().strip("/")
             self._save_word_doc(case)
+        elif url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)
 
     def _save_word_doc(self, case: str):
         from gui.tabs.qy_method_doc import generate_case_method_doc

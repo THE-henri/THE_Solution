@@ -38,6 +38,16 @@ from gui.widgets.info_button import InfoButton
 from gui.worker import Worker
 
 
+def _fit_table_height(table):
+    """Make a results table exactly as tall as its rows (it has no scrollbar),
+    so the layout cannot squeeze rows underneath the next widget."""
+    h = table.horizontalHeader().height() + 2 * table.frameWidth()
+    h += sum(table.rowHeight(r) for r in range(table.rowCount()))
+    if table.horizontalScrollBar().isVisible():
+        h += table.horizontalScrollBar().height()
+    table.setFixedHeight(h)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Sub-panel A — Chemical Actinometry
 # ══════════════════════════════════════════════════════════════════════════════
@@ -93,10 +103,10 @@ class _ChemActinometerPanel(QWidget):
         self._select_btn.setFixedWidth(120)
         self._select_btn.clicked.connect(self._select_files)
         self._remove_btn = QPushButton("Remove selected")
-        self._remove_btn.setFixedWidth(120)
+        self._remove_btn.setMinimumWidth(120)
         self._remove_btn.clicked.connect(self._remove_selected)
         self._clear_btn = QPushButton("Clear all")
-        self._clear_btn.setFixedWidth(70)
+        self._clear_btn.setMinimumWidth(90)
         self._clear_btn.clicked.connect(self._clear_files)
         ctrl.addWidget(self._select_btn)
         ctrl.addWidget(self._remove_btn)
@@ -140,9 +150,10 @@ class _ChemActinometerPanel(QWidget):
             "Actinometer",
             "Select the chemical actinometer that matches your irradiation\n"
             "wavelength and experimental conditions.\n\n"
-            "Each entry shows the applicable wavelength range.\n"
-            "The most common choice for visible light is Reinecke's salt\n"
-            "or potassium ferrioxalate depending on wavelength."))
+            "Each entry shows the applicable wavelength range.\n\n"
+            "QY(λ) formulae and ε values of both actinometers are from\n"
+            "T. Sumi et al., Chem. Commun. 2014, 50, 3928\n"
+            "(doi:10.1039/c4cc00396a) — please cite when publishing."))
         _act_hdr.addStretch()
         act_col.addLayout(_act_hdr)
         self._act_combo = QComboBox()
@@ -462,6 +473,7 @@ class _ChemActinometerPanel(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self._res_table.setItem(row, col, item)
+        _fit_table_height(self._res_table)
 
     def _show_result(self, idx: int):
         if not self._results:
@@ -1257,10 +1269,10 @@ class _LEDActinometryPanel(QWidget):
         self._sel_btn.setFixedWidth(120)
         self._sel_btn.clicked.connect(self._select_files)
         self._rem_btn = QPushButton("Remove selected")
-        self._rem_btn.setFixedWidth(120)
+        self._rem_btn.setMinimumWidth(120)
         self._rem_btn.clicked.connect(self._remove_selected)
         self._clr_btn = QPushButton("Clear all")
-        self._clr_btn.setFixedWidth(70)
+        self._clr_btn.setMinimumWidth(90)
         self._clr_btn.clicked.connect(self._clear_files)
         file_ctrl.addWidget(self._sel_btn)
         file_ctrl.addWidget(self._rem_btn)
@@ -1888,6 +1900,7 @@ class _LEDActinometryPanel(QWidget):
                     Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self._res_table.setItem(row, col, item)
         self._res_table.resizeRowsToContents()
+        _fit_table_height(self._res_table)
 
     def _show_result(self, idx: int):
         if not self._results:

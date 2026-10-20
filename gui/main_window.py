@@ -6,13 +6,14 @@ from PyQt6.QtCore import Qt
 
 from gui.folder_header import FolderHeader
 from gui.log_panel import LogPanel
+from app_info import APP_NAME, __version__
 from gui.tabs.half_life_tab import HalfLifeTab
 from gui.tabs.actinometer_tab import ActinometerTab
 from gui.tabs.thermal_tab import ThermalTab
 from gui.tabs.extinction_coeff_tab import ExtinctionCoeffTab
 from gui.tabs.spectra_tab import SpectraTab
 from gui.tabs.qy_tab import QuantumYieldTab
-from gui.tabs.placeholder_tab import PlaceholderTab
+from gui.tabs.parameters_tab import ParametersTab
 from gui.tabs.handbook_tab import HandbookTab
 from gui.tabs.spectral_editor_tab import SpectralEditorTab
 from gui.project_prefs import ProjectPrefs
@@ -21,7 +22,7 @@ from gui.project_prefs import ProjectPrefs
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QY Tool")
+        self.setWindowTitle(f"{APP_NAME}  v{__version__}")
         self.setMinimumSize(1100, 780)
         self._build_ui()
 
@@ -58,7 +59,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._thermal_tab,                      "Thermal")
         self._tabs.addTab(self._actinometer_tab,                  "Actinometer")
         self._tabs.addTab(self._qy_tab,                           "Quantum Yield")
-        self._tabs.addTab(PlaceholderTab("Parameters"),           "Parameters")
+        self._parameters_tab = ParametersTab(self._collect_prefs)
+        self._tabs.addTab(self._parameters_tab,                   "Parameters")
         self._tabs.addTab(SpectralEditorTab(),                    "Spectral Editor")
         self._tabs.addTab(HandbookTab(),                          "Handbook")
 
@@ -79,6 +81,8 @@ class MainWindow(QMainWindow):
         self._folder_header.raw_folder_changed.connect(self._spectra_tab.set_raw_path)
         self._folder_header.compound_name_changed.connect(self._extinction_coeff_tab.set_compound_name)
         self._folder_header.compound_name_changed.connect(self._thermal_tab.set_compound_name)
+        self._folder_header.compound_name_changed.connect(self._spectra_tab.set_compound_name)
+        self._folder_header.compound_name_changed.connect(self._qy_tab.set_compound_name)
         self._folder_header.output_folder_changed.connect(self._on_output_changed)
         self._folder_header.output_folder_changed.connect(self._log.set_log_dir)
         self._folder_header.prefs_save_requested.connect(self._save_prefs)
@@ -119,6 +123,26 @@ class MainWindow(QMainWindow):
         self._extinction_coeff_tab.apply_prefs(prefs)
         self._spectra_tab.apply_prefs(prefs)
         self._qy_tab.apply_prefs(prefs)
+        # The compound name lives in the header (shared by all tabs)
+        name = (prefs.extinction_coeff.compound_name or prefs.thermal.compound_name
+                or prefs.quantum_yield.compound_name or prefs.spectra.compound_name)
+        if name:
+            self._folder_header.set_compound_name(name)
+
+    def _collect_prefs(self) -> ProjectPrefs:
+        prefs = ProjectPrefs()
+        self._half_life_tab.collect_prefs(prefs)
+        self._actinometer_tab.collect_prefs(prefs)
+        self._thermal_tab.collect_prefs(prefs)
+        self._extinction_coeff_tab.collect_prefs(prefs)
+        self._spectra_tab.collect_prefs(prefs)
+        self._qy_tab.collect_prefs(prefs)
+        name = self._folder_header.compound_name
+        prefs.extinction_coeff.compound_name = name
+        prefs.thermal.compound_name = name
+        prefs.quantum_yield.compound_name = name
+        prefs.spectra.compound_name = name
+        return prefs
 
     def _save_prefs(self):
         start_dir = str(self._folder_header.output_path or Path.home())
@@ -129,14 +153,9 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
         dest = Path(file_path)
-        prefs = ProjectPrefs()
-        self._half_life_tab.collect_prefs(prefs)
-        self._actinometer_tab.collect_prefs(prefs)
-        self._thermal_tab.collect_prefs(prefs)
-        self._extinction_coeff_tab.collect_prefs(prefs)
-        self._spectra_tab.collect_prefs(prefs)
-        self._qy_tab.collect_prefs(prefs)
+        prefs = self._collect_prefs()
         prefs.save(dest)
+        self._parameters_tab.set_loaded(prefs, dest)
         self._folder_header.set_prefs_status(f"Saved → {dest}")
         print(f"[Preferences] Saved to {dest}")
 
@@ -153,6 +172,7 @@ class MainWindow(QMainWindow):
                 f"Failed to load {Path(file_path).name}", ok=False)
             return
         self._apply_prefs(prefs)
+        self._parameters_tab.set_loaded(prefs, Path(file_path))
         self._folder_header.set_prefs_status(f"Loaded → {Path(file_path).name}")
         print(f"[Preferences] Loaded from {file_path}")
 

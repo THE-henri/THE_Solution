@@ -22,7 +22,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -276,21 +275,8 @@ class SpectraTab(QWidget):
         shared_grp = QGroupBox("Sample")
         shared_lay = QVBoxLayout(shared_grp)
 
-        c1 = QHBoxLayout()
-        _cn_lbl = QLabel("Compound name:")
-        _cn_lbl.setObjectName("pref_label")
-        c1.addWidget(_cn_lbl)
-        c1.addWidget(InfoButton(
-            "Compound name",
-            "Identifier used in plot titles and output filenames.\n"
-            "Does not affect the calculation.",
-        ))
-        self._compound_edit = QLineEdit()
-        self._compound_edit.setPlaceholderText("e.g. DAE_001")
-        self._compound_edit.setFixedWidth(180)
-        c1.addWidget(self._compound_edit)
-        c1.addStretch()
-        shared_lay.addLayout(c1)
+        # Compound name comes from the header (set_compound_name)
+        self._compound_name = ""
 
         c2 = QHBoxLayout()
         _pl_lbl = QLabel("Path length (cm):")
@@ -830,10 +816,18 @@ class SpectraTab(QWidget):
             "the Quantum Yield tab (Stage 3 → ε CSV source).")
         self._export_qy_btn.clicked.connect(self._export_for_qy)
         self._export_qy_btn.setEnabled(False)
+        self._export_origin_btn = QPushButton("📊  Export to Origin…")
+        self._export_origin_btn.setFixedWidth(180)
+        self._export_origin_btn.setToolTip(
+            "Write A, B and B's uncertainty band into a new Origin project,\n"
+            "or as a new folder into an existing one. Needs OriginPro 2021+.")
+        self._export_origin_btn.clicked.connect(self._export_origin)
+        self._export_origin_btn.setEnabled(False)
         self._save_status_lbl = QLabel("")
         self._save_status_lbl.setStyleSheet("color:#555;")
         save_row.addWidget(self._save_btn)
         save_row.addWidget(self._export_qy_btn)
+        save_row.addWidget(self._export_origin_btn)
         save_row.addWidget(self._save_status_lbl, 1)
         save_row.addStretch()
         self._stage3.add_layout(save_row)
@@ -913,7 +907,9 @@ class SpectraTab(QWidget):
         open_act = menu.addAction("Open source file")
         action = menu.exec(self._irrad_list.mapToGlobal(pos))
         if action == open_act:
-            os.startfile(str(src))
+            from PyQt6.QtCore import QUrl
+            from PyQt6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(src)))   # works on Windows and macOS
 
     def _select_pss(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1212,7 +1208,7 @@ class SpectraTab(QWidget):
 
         params = SpectraParams(
             mode                    = mode,
-            compound_name           = self._compound_edit.text().strip(),
+            compound_name           = self._compound_name,
             path_length_cm          = self._path_length_spin.value(),
             concentration_mol_L     = concentration,
             baseline_offset         = self._baseline_offset_spin.value(),
@@ -1299,6 +1295,7 @@ class SpectraTab(QWidget):
         self._stage3.set_status(DONE)
         self._save_btn.setEnabled(True)
         self._export_qy_btn.setEnabled(True)
+        self._export_origin_btn.setEnabled(True)
 
     def _apply_smoothing_display(self, *_):
         """Re-render the result plot with or without smoothing applied to S_B."""
@@ -1413,7 +1410,20 @@ class SpectraTab(QWidget):
         else:
             self._save_status_lbl.setText("Exported: " + "  |  ".join(saved))
 
+    def _export_origin(self):
+        """Export A, B and B's uncertainty (as displayed, incl. smoothing) to Origin."""
+        if self._result is None:
+            return
+        from gui.tabs.origin_export import export_with_dialog, export_spectra
+        r = self._result
+        start = self._output_path / "spectra" / "results" if self._output_path else Path.home()
+        export_with_dialog(self, f"{r.compound or 'Spectra'} {r.mode}", str(start),
+                           export_spectra, r, status_label=self._save_status_lbl)
+
     # ── Prefs ─────────────────────────────────────────────────────────────────
+
+    def set_compound_name(self, name: str):
+        self._compound_name = name.strip()
 
     def set_raw_path(self, path: Path):
         self._raw_path = path
@@ -1426,7 +1436,6 @@ class SpectraTab(QWidget):
 
     def apply_prefs(self, prefs: ProjectPrefs):
         p = prefs.spectra
-        self._compound_edit.setText(p.compound_name)
         self._path_length_spin.setValue(p.path_length_cm)
         mode_idx = self._mode_combo.findText(p.mode)
         if mode_idx >= 0:
@@ -1444,7 +1453,6 @@ class SpectraTab(QWidget):
         self._pss_obs_wl_spin.setValue(p.pss_obs_wavelength_nm)
 
     def collect_prefs(self, prefs: ProjectPrefs):
-        prefs.spectra.compound_name           = self._compound_edit.text().strip()
         prefs.spectra.path_length_cm          = self._path_length_spin.value()
         prefs.spectra.mode                    = self._mode_combo.currentText()
         prefs.spectra.reference_wavelength_nm = self._ref_edit.text().strip()

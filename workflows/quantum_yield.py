@@ -59,7 +59,7 @@ data_type                 = "kinetic"
 # "LED"           : irradiation band with emission spectrum — structure reserved, not yet implemented
 irradiation_source        = "LED"
 
-compound_name             = "AZA-SO2Me"    # used in plot titles and saved output
+compound_name             = "COMPOUND-NAME"    # used in plot titles and saved output
 temperature_C             = 25.0           # °C — sample temperature (stored in results)
 solvent                   = "MeCN"         # solvent description (stored in results)
 
@@ -137,7 +137,7 @@ epsilon_source_B          = "manual"         # Options: "manual" | "ec_results" 
 
 # --- ec_results source ---
 # Set to None to use the most recently modified CSV in data/extinction_coefficients/results/.
-# Set to a filename string (not full path) to pin a specific file, e.g. "AZA_EC_25C_...csv"
+# Set to a filename string (not full path) to pin a specific file, e.g. "COMPOUND-NAME_EC_25C_...csv"
 epsilon_A_ec_results_file = None           # None (most recent) or filename string
 epsilon_B_ec_results_file = None           # None (most recent) or filename string
 

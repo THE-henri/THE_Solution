@@ -1169,6 +1169,23 @@ class QuantumYieldTab(QWidget):
             "Molar extinction coefficient of species A at the irradiation\nwavelength in M\u207b\u00b9cm\u207b\u00b9.\n\nDetermine from a Beer\u2013Lambert plot using pure-A solutions.\nTypical values: 10\u00b2 \u2013 10\u2075 M\u207b\u00b9cm\u207b\u00b9."
         ))
         eamg.addLayout(_row_eps_a_irr)
+        self._eps_a_mon_spin = QDoubleSpinBox()
+        self._eps_a_mon_spin.setRange(0, 1e7)
+        self._eps_a_mon_spin.setDecimals(1)
+        self._eps_a_mon_spin.setValue(0.0)
+        self._eps_a_mon_spin.setSuffix(" M\u207b\u00b9cm\u207b\u00b9")
+        self._eps_a_mon_spin.setSpecialValueText("same as irr \u03bb")
+        _row_eps_a_mon = _field_row("\u03b5_A at mon \u03bb:", self._eps_a_mon_spin, 140, pref=True)
+        _row_eps_a_mon.insertWidget(1, InfoButton(
+            "\u03b5_A at monitoring \u03bb (M\u207b\u00b9cm\u207b\u00b9)",
+            "Molar extinction coefficient of A at the monitoring wavelength.\n\n"
+            "Required when the monitoring and irradiation wavelengths differ.\n"
+            "Leave at 0 ('same as irr \u03bb') only if both wavelengths are identical.\n\n"
+            "Used to derive the A\u2080 \u2192 [A]\u2080 conversion and to scale the ODE-fit\n"
+            "model absorbance. For the linearised method it sets the\n"
+            "\u03b5_A_irr / \u03b5_A_mon ratio that converts A_mon(t) \u2192 A_irr(t)."
+        ))
+        eamg.addLayout(_row_eps_a_mon)
         eag.addWidget(self._eps_a_manual_grp)
 
         self._eps_a_csv_grp = QGroupBox("")
@@ -1208,6 +1225,13 @@ class QuantumYieldTab(QWidget):
         self._eps_b_irr_spin.setValue(0.0)
         self._eps_b_irr_spin.setSuffix(" M⁻¹cm⁻¹")
         ebmg.addLayout(_field_row("ε_B at irr λ:", self._eps_b_irr_spin, 140, pref=True))
+        self._eps_b_mon_spin = QDoubleSpinBox()
+        self._eps_b_mon_spin.setRange(0, 1e7)
+        self._eps_b_mon_spin.setDecimals(1)
+        self._eps_b_mon_spin.setValue(0.0)
+        self._eps_b_mon_spin.setSuffix(" M⁻¹cm⁻¹")
+        self._eps_b_mon_spin.setSpecialValueText("same as irr λ")
+        ebmg.addLayout(_field_row("ε_B at mon λ:", self._eps_b_mon_spin, 140, pref=True))
         ebg.addWidget(self._eps_b_manual_grp)
 
         self._eps_b_csv_grp = QGroupBox("")
@@ -1576,7 +1600,8 @@ class QuantumYieldTab(QWidget):
         # ── Stage 3 ──────────────────────────────────────────────────────────
         for w in (self._eps_a_src_combo, self._eps_b_src_combo):
             w.currentTextChanged.connect(self._mark_stale)
-        for w in (self._eps_a_irr_spin, self._eps_b_irr_spin):
+        for w in (self._eps_a_irr_spin, self._eps_a_mon_spin,
+                  self._eps_b_irr_spin, self._eps_b_mon_spin):
             w.valueChanged.connect(self._mark_stale)
         for w in (self._eps_a_csv_edit, self._eps_a_col_edit,
                   self._eps_b_csv_edit, self._eps_b_col_edit):
@@ -1975,6 +2000,7 @@ class QuantumYieldTab(QWidget):
 
     def _collect_params(self) -> QYParams:
         p = QYParams()
+        p.compound_name = getattr(self, "_compound_name", "")   # from the header
 
         # Stage 1 — flux
         p.data_type = self._data_type_combo.currentText()
@@ -2092,6 +2118,8 @@ class QuantumYieldTab(QWidget):
         p.epsilon_source_A = self._eps_a_src_combo.currentText()
         if p.epsilon_source_A == "manual":
             p.epsilon_A_irr = self._eps_a_irr_spin.value()
+            v = self._eps_a_mon_spin.value()
+            p.epsilon_A_mon = v if v > 0 else None
         else:
             txt = self._eps_a_csv_edit.text().strip()
             p.epsilon_A_csv = Path(txt) if txt else None
@@ -2100,6 +2128,8 @@ class QuantumYieldTab(QWidget):
         p.epsilon_source_B = self._eps_b_src_combo.currentText()
         if p.epsilon_source_B == "manual":
             p.epsilon_B_irr = self._eps_b_irr_spin.value()
+            v = self._eps_b_mon_spin.value()
+            p.epsilon_B_mon = v if v > 0 else None
         else:
             txt = self._eps_b_csv_edit.text().strip()
             p.epsilon_B_csv = Path(txt) if txt else None
@@ -2160,14 +2190,20 @@ class QuantumYieldTab(QWidget):
                 params.epsilon_source_B, params.epsilon_B_csv,
                 params.epsilon_B_col, irr_wl, params.epsilon_B_irr, "B")
 
-            # Resolve ε_A_mon for the linearized method
+            # Resolve ε_A_mon for the linearized method.
+            # For CSV source the value is read from the file; for manual source
+            # use the dedicated epsilon_A_mon field when set, else fall back to
+            # epsilon_A_irr (only valid if mon λ == irr λ).
             mon_wls_resolved = (
                 [float(w) for w in params.monitoring_wavelengths]
                 if params.monitoring_wavelengths else [irr_wl])
+            _man_A_mon = (params.epsilon_A_mon
+                          if params.epsilon_A_mon is not None
+                          else params.epsilon_A_irr)
             eps_a_mon_val = load_epsilon_at_wavelengths(
                 params.epsilon_source_A, params.epsilon_A_csv,
                 params.epsilon_A_col, mon_wls_resolved[:1],
-                params.epsilon_A_irr)[0] if use_linearized else 0.0
+                _man_A_mon)[0] if use_linearized else 0.0
 
             # LED ε arrays (if LED full-integration)
             led_eps_a = None
@@ -2692,6 +2728,9 @@ class QuantumYieldTab(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def set_compound_name(self, name: str):
+        self._compound_name = name.strip()
+
     def set_output_path(self, path: Path):
         self._output_path = path
         plots_dir = path / "quantum_yield" / "results" / "plots"
@@ -2725,8 +2764,10 @@ class QuantumYieldTab(QWidget):
         self._kth_temp_spin.setValue(qp.k_th_temperature_C)
         self._eps_a_src_combo.setCurrentText(qp.epsilon_source_A)
         self._eps_a_irr_spin.setValue(qp.epsilon_A_irr)
+        self._eps_a_mon_spin.setValue(qp.epsilon_A_mon or 0.0)
         self._eps_b_src_combo.setCurrentText(qp.epsilon_source_B)
         self._eps_b_irr_spin.setValue(qp.epsilon_B_irr)
+        self._eps_b_mon_spin.setValue(qp.epsilon_B_mon or 0.0)
         self._qy_ab_init_spin.setValue(qp.QY_AB_init)
         self._qy_ba_init_spin.setValue(qp.QY_BA_init)
         self._wl_tol_spin.setValue(qp.wavelength_tolerance_nm)
@@ -2754,8 +2795,12 @@ class QuantumYieldTab(QWidget):
         qp.k_th_temperature_C      = self._kth_temp_spin.value()
         qp.epsilon_source_A        = self._eps_a_src_combo.currentText()
         qp.epsilon_A_irr           = self._eps_a_irr_spin.value()
+        v = self._eps_a_mon_spin.value()
+        qp.epsilon_A_mon           = v if v > 0 else None
         qp.epsilon_source_B        = self._eps_b_src_combo.currentText()
         qp.epsilon_B_irr           = self._eps_b_irr_spin.value()
+        v = self._eps_b_mon_spin.value()
+        qp.epsilon_B_mon           = v if v > 0 else None
         qp.QY_AB_init              = self._qy_ab_init_spin.value()
         qp.QY_BA_init              = self._qy_ba_init_spin.value()
         qp.wavelength_tolerance_nm = self._wl_tol_spin.value()

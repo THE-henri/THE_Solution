@@ -69,7 +69,10 @@ class ExtinctionCoeffTab(QWidget):
             "a file are averaged to give one preparation value; preparations are "
             "then averaged for the final ε spectrum.\n\n"
             "Enter the dissolved mass (mg), molar mass (g/mol), and volume (mL) "
-            "for each file to calculate the exact concentration."
+            "for each file to calculate the exact concentration.\n\n"
+            "If mass and volume were not recorded, enter the concentration "
+            "(mol/L) directly in the last column instead. A concentration "
+            "entered there is used even if mass, MW and volume are filled in."
         )
 
         hint = QLabel(
@@ -93,16 +96,20 @@ class ExtinctionCoeffTab(QWidget):
         ctrl.addStretch()
         self._stage1.add_layout(ctrl)
 
-        self._table = QTableWidget(0, 5)
+        self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels(
-            ["File", "Weight (mg)", "MW (g/mol)", "Volume (mL)", ""])
+            ["File", "Weight (mg)", "MW (g/mol)", "Volume (mL)", "or c (mol/L)", ""])
+        self._table.horizontalHeaderItem(4).setToolTip(
+            "Optional: concentration entered directly (e.g. 2.5e-5).\n"
+            "Use when mass and volume were not recorded — overrides them.")
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(4, 52)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(5, 52)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setMinimumHeight(140)
         self._table.setMaximumHeight(260)
@@ -312,7 +319,7 @@ class ExtinctionCoeffTab(QWidget):
         file_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._table.setItem(row, 0, file_item)
 
-        for col in (1, 2, 3):
+        for col in (1, 2, 3, 4):
             num_item = QTableWidgetItem("")
             num_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -321,13 +328,13 @@ class ExtinctionCoeffTab(QWidget):
         del_btn = QPushButton("✕")
         del_btn.setFixedWidth(44)
         del_btn.clicked.connect(self._delete_row_by_sender)
-        self._table.setCellWidget(row, 4, del_btn)
+        self._table.setCellWidget(row, 5, del_btn)
         self._table.blockSignals(False)
 
     def _delete_row_by_sender(self):
         btn = self.sender()
         for row in range(self._table.rowCount()):
-            if self._table.cellWidget(row, 4) is btn:
+            if self._table.cellWidget(row, 5) is btn:
                 self._table.removeRow(row)
                 break
         self._update_stage1_status()
@@ -343,12 +350,11 @@ class ExtinctionCoeffTab(QWidget):
             self._run_btn.setEnabled(False)
             return
         for row in range(self._table.rowCount()):
-            for col in (1, 2, 3):
-                item = self._table.item(row, col)
-                if item is None or item.text().strip() == "":
-                    self._stage1.set_status(WAITING)
-                    self._run_btn.setEnabled(False)
-                    return
+            filled = [bool(self._cell(row, col)) for col in (1, 2, 3, 4)]
+            if not (filled[3] or all(filled[:3])):   # need c, or mass + MW + volume
+                self._stage1.set_status(WAITING)
+                self._run_btn.setEnabled(False)
+                return
         self._stage1.set_status(READY)
         self._run_btn.setEnabled(True)
 
@@ -358,23 +364,30 @@ class ExtinctionCoeffTab(QWidget):
 
     # ── Run ───────────────────────────────────────────────────────────────
 
+    def _cell(self, row: int, col: int) -> str:
+        item = self._table.item(row, col)
+        return item.text().strip() if item is not None else ""
+
     def _collect_measurements(self) -> tuple[list, list[str]]:
         measurements, errors = [], []
         for row in range(self._table.rowCount()):
             path_str = self._table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             try:
-                weight_mg = float(self._table.item(row, 1).text())
-                mw_gmol   = float(self._table.item(row, 2).text())
-                volume_ml = float(self._table.item(row, 3).text())
-            except (ValueError, AttributeError):
+                if self._cell(row, 4):            # concentration entered directly
+                    conc = float(self._cell(row, 4).replace(",", "."))
+                    if conc <= 0:
+                        raise ValueError
+                    measurements.append({"csv_file": path_str, "conc_molL": conc})
+                    print(f"Row {row + 1}: using entered concentration {conc:.4e} mol/L")
+                    continue
+                measurements.append({
+                    "csv_file":  path_str,
+                    "weight_mg": float(self._cell(row, 1).replace(",", ".")),
+                    "MW_gmol":   float(self._cell(row, 2).replace(",", ".")),
+                    "volume_mL": float(self._cell(row, 3).replace(",", ".")),
+                })
+            except ValueError:
                 errors.append(f"Row {row + 1}: invalid number")
-                continue
-            measurements.append({
-                "csv_file":  path_str,
-                "weight_mg": weight_mg,
-                "MW_gmol":   mw_gmol,
-                "volume_mL": volume_ml,
-            })
         return measurements, errors
 
     def _run(self):

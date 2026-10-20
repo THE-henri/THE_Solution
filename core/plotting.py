@@ -177,12 +177,9 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
         # popt is always (A0, A_inf, k) \u2014 use A_inf to compute delta
         A_inf   = float(popt[1])
         delta_A = absorbance_sel - A_inf
-        if abs(A_inf) > 1e-10:
-            valid   = np.abs(delta_A) > 1e-10
-            y_label = "ln|Absorbance \u2212 A\u221e|"
-        else:
-            valid   = absorbance_sel > 0
-            y_label = "ln(Absorbance)"
+        valid   = np.abs(delta_A) > 1e-10
+        y_label = ("ln|Absorbance \u2212 A\u221e|" if abs(A_inf) > 1e-10
+                    else "ln|Absorbance|")
 
         if valid.sum() > 1:
             t_valid = time_sel[valid]
@@ -197,10 +194,7 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
         # Overlay outliers on the linearised panel
         if time_outliers is not None and len(time_outliers) > 0:
             delta_out = absorbance_outliers - A_inf
-            if abs(A_inf) > 1e-10:
-                loggable = np.abs(delta_out) > 1e-10
-            else:
-                loggable = absorbance_outliers > 0
+            loggable  = np.abs(delta_out) > 1e-10
             if loggable.sum() > 0:
                 ax2.plot(time_outliers[loggable], np.log(np.abs(delta_out[loggable])),
                          'x', color='red', markersize=6, markeredgewidth=1.5,
@@ -210,7 +204,8 @@ def plot_half_life_with_linear(time, absorbance, start_idx=None, end_idx=None,
         ax2.set_ylabel(y_label)
         if title:
             ax2.set_title(f"{title} \u2014 Linearised")
-        ax2.legend()
+        if ax2.get_legend_handles_labels()[0]:
+            ax2.legend()
         ax2.grid(True)
 
     plt.tight_layout()

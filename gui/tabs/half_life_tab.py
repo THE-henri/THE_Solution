@@ -666,15 +666,18 @@ class KineticsPanel(QWidget):
             k_exp = float(popt[2])
             ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
             valid   = np.abs(r.abs_clean - a_inf) > 1e-10
-            # k / t_half / R² — honour the user's fit-mode choice
+            # k / A0 / t_half / R² — honour the user's fit-mode choice
             if use_linear and r.k_linear is not None:
                 k_save      = r.k_linear
                 t_half_save = r.t_half_linear
                 r2_save     = r.r2_linear
+                a0          = r.a0_linear if r.a0_linear is not None else a0
+                fit_method  = "linear"
             else:
                 k_save      = k_exp
                 t_half_save = r.t_half
                 r2_save     = r.r2
+                fit_method  = "exponential"
             # Fit line via linear regression on log data (matches individual plots)
             t_valid  = r.time_clean[valid]
             ln_valid = ln_data[valid]
@@ -696,7 +699,7 @@ class KineticsPanel(QWidget):
             }))
             params_rows.append({
                 "channel": col_lbl, "k_s-1": k_save, "t_half_s": t_half_save,
-                "A0": a0, "A_inf": a_inf, "R2": r2_save,
+                "A0": a0, "A_inf": a_inf, "R2": r2_save, "fit_method": fit_method,
             })
         if data_frames:
             pd.concat(data_frames, axis=1).to_csv(
@@ -1149,10 +1152,14 @@ class KineticsPanel(QWidget):
                 k_saved      = r.k_linear
                 t_half_saved = r.t_half_linear
                 r2_saved     = r.r2_linear
+                a0_saved     = r.a0_linear
+                fit_method   = "linear"
             else:
                 k_saved      = popt[-1] if popt is not None else None
                 t_half_saved = r.t_half
                 r2_saved     = r.r2
+                a0_saved     = popt[0] if popt is not None else None
+                fit_method   = "exponential"
             result_entries.append({
                 "File":          Path(self._k_file_edit.text()).name,
                 "Segment":       self._k_seg_label(),
@@ -1160,11 +1167,12 @@ class KineticsPanel(QWidget):
                 "Type":          "Kinetics",
                 "Temperature_C": r.temperature_c,
                 "Switch":        switch_val,
-                "A0":            popt[0] if popt is not None else None,
+                "A0":            a0_saved,
                 "A_inf":         float(popt[1]) if popt is not None and len(popt) >= 3 else None,
                 "k":             k_saved,
                 "Half_life_s":   t_half_saved,
                 "R2":            r2_saved,
+                "Fit_Method":    fit_method,
             })
 
         self._last_results = results
@@ -1210,9 +1218,8 @@ class KineticsPanel(QWidget):
     def set_output_path(self, path: Path):
         self._output_path = path
         self._k_master.set_output_path(path)
-        plots_dir = path / "half_life" / "results" / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        self._k_raw_plot.set_save_dir(plots_dir)
+        # created by the plot's Save button only when something is saved
+        self._k_raw_plot.set_save_dir(path / "half_life" / "results" / "plots")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1866,21 +1873,26 @@ class ScanningKineticsPanel(QWidget):
                 k_saved_sk      = r.k_linear
                 t_half_saved_sk = r.t_half_linear
                 r2_saved_sk     = r.r2_linear
+                a0_saved_sk     = r.a0_linear
+                fit_method_sk   = "linear"
             else:
                 k_saved_sk      = r.popt[-1] if r.popt is not None else None
                 t_half_saved_sk = r.t_half
                 r2_saved_sk     = r.r2
+                a0_saved_sk     = r.popt[0] if r.popt is not None else None
+                fit_method_sk   = "exponential"
             result_entries.append({
                 "File":          Path(self._sk_file_edit.text()).name,
                 "Wavelength":    r.label,
                 "Type":          "Scanning Kinetics",
                 "Temperature_C": r.temperature_c,
                 "Switch":        r.switch,
-                "A0":            r.popt[0] if r.popt is not None else None,
+                "A0":            a0_saved_sk,
                 "A_inf":         float(r.popt[1]) if r.popt is not None and len(r.popt) >= 3 else None,
                 "k":             k_saved_sk,
                 "Half_life_s":   t_half_saved_sk,
                 "R2":            r2_saved_sk,
+                "Fit_Method":    fit_method_sk,
             })
 
         if result_entries:
@@ -1936,15 +1948,18 @@ class ScanningKineticsPanel(QWidget):
             k_exp = float(popt[2])
             ln_data = np.log(np.maximum(np.abs(r.abs_clean - a_inf), 1e-20))
             valid   = np.abs(r.abs_clean - a_inf) > 1e-10
-            # k / t_half / R² — honour the user's fit-mode choice
+            # k / A0 / t_half / R² — honour the user's fit-mode choice
             if use_linear and r.k_linear is not None:
                 k_save      = r.k_linear
                 t_half_save = r.t_half_linear
                 r2_save     = r.r2_linear
+                a0          = r.a0_linear if r.a0_linear is not None else a0
+                fit_method  = "linear"
             else:
                 k_save      = k_exp
                 t_half_save = r.t_half
                 r2_save     = r.r2
+                fit_method  = "exponential"
             # Fit line via linear regression on log data (matches individual plots)
             t_valid  = r.time_clean[valid]
             ln_valid = ln_data[valid]
@@ -1967,7 +1982,7 @@ class ScanningKineticsPanel(QWidget):
             }))
             params_rows.append({
                 "channel": r.label, "k_s-1": k_save, "t_half_s": t_half_save,
-                "A0": a0, "A_inf": a_inf, "R2": r2_save,
+                "A0": a0, "A_inf": a_inf, "R2": r2_save, "fit_method": fit_method,
             })
 
         if data_frames:
@@ -1989,12 +2004,18 @@ class ScanningKineticsPanel(QWidget):
             self._sk_sw_neg.setChecked(True)
         self._sk_iqr.setValue(prefs.iqr_factor)
         self._sk_temp.setValue(prefs.temperature_c)
+        {"fixed": self._sk_ref_fixed, "free": self._sk_ref_free}.get(
+            prefs.a_inf_mode, self._sk_ref_file).setChecked(True)
+        self._sk_ref_ainf_val.setValue(prefs.a_inf_value)
 
     def collect_prefs(self, prefs):
         """Write current widget values into a HalfLifeScanningPrefs object."""
         prefs.switch        = "positive" if self._sk_sw_pos.isChecked() else "negative"
         prefs.iqr_factor    = self._sk_iqr.value()
         prefs.temperature_c = self._sk_temp.value()
+        prefs.a_inf_mode    = ("fixed" if self._sk_ref_fixed.isChecked() else
+                               "free" if self._sk_ref_free.isChecked() else "reference")
+        prefs.a_inf_value   = self._sk_ref_ainf_val.value()
 
     def set_raw_path(self, path: Path):
         self._raw_path = path
@@ -2002,9 +2023,8 @@ class ScanningKineticsPanel(QWidget):
     def set_output_path(self, path: Path):
         self._output_path = path
         self._sk_master.set_output_path(path)
-        plots_dir = path / "half_life" / "results" / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        self._sk_raw_plot.set_save_dir(plots_dir)
+        # created by the plot's Save button only when something is saved
+        self._sk_raw_plot.set_save_dir(path / "half_life" / "results" / "plots")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2323,7 +2343,16 @@ class PublicationPanel(QWidget):
         btn_exp.setObjectName("accent")
         btn_exp.setFixedHeight(34)
         btn_exp.clicked.connect(self._export_excel)
-        card.add_widget(btn_exp)
+        btn_origin = QPushButton("📊  Export to Origin…")
+        btn_origin.setFixedHeight(34)
+        btn_origin.setToolTip(
+            "Write the data and graphs into a new Origin project, or as a new\n"
+            "folder into an existing one. Needs OriginPro 2021+ installed.")
+        btn_origin.clicked.connect(self._export_origin)
+        exp_row = QHBoxLayout()
+        exp_row.addWidget(btn_exp)
+        exp_row.addWidget(btn_origin)
+        card.add_layout(exp_row)
         self._pub_exp_lbl = QLabel("")
         self._pub_exp_lbl.setObjectName("detected_label")
         card.add_widget(self._pub_exp_lbl)
@@ -2626,6 +2655,21 @@ class PublicationPanel(QWidget):
         except Exception as exc:
             self._pub_exp_lbl.setText(f"Error: {exc}")
             self._card5.set_status(ERROR)
+
+    def _export_origin(self):
+        """Export the publication data + graphs into an Origin project."""
+        from gui.tabs.origin_export import export_with_dialog, export_half_life_publication
+        raw_files = [(e.raw_path, e.seg_path) for e in self._raw_entries if e.raw_path]
+        segment_slots = [[(e.folder_path, e.active_channels) for e in entries
+                          if e.folder_path is not None]
+                         for entries in self._seg_entries]
+        ok = export_with_dialog(
+            self, self._pub_folder.name if self._pub_folder else "Half-life",
+            self._pub_out_edit.text().strip() or str(self._pub_folder or ""),
+            export_half_life_publication, raw_files, segment_slots,
+            status_label=self._pub_exp_lbl)
+        if ok:
+            self._card5.set_status(DONE)
 
     def set_output_path(self, path: Path):
         """Called by HalfLifeTab when the project output path changes."""

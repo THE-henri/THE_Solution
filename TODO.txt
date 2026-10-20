@@ -15,17 +15,22 @@ How to use this file
   KNOWN BUGS
 ================================================================================
 
-[ ] Preference parameters not restored correctly on load (2026-05-29)
+[~] Preference parameters not restored correctly on load (2026-05-29)
     > Many spin box / combo box values do not round-trip through prefs.json —
     > after loading a saved preferences file, some fields show wrong values.
     > Needs systematic check of collect_prefs / apply_prefs in every tab.
+    > (2026-10-20) Automated round-trip test over all ProjectPrefs fields: fixed
+    > scanning-kinetics A-inf mode/value (were never saved) and compound name
+    > (now saved from / restored into the header). All dataclass fields now
+    > round-trip. Still open: GUI settings that are not in ProjectPrefs at all.
 
 [ ] Folder selections wired to wrong paths (2026-05-29)
     > Some tabs receive raw_folder_changed or output_folder_changed from the
     > wrong signal in main_window.py, causing them to operate on the wrong
     > directory.  Check every signal connection in MainWindow._build_ui().
 
-[ ] Parameters tab is a placeholder — not yet implemented
+[x] Parameters tab is a placeholder — not yet implemented (2026-10-20)
+    > Now lists all preference variables per section: current / loaded / default.
 
 
 ================================================================================
@@ -114,7 +119,17 @@ How to use this file
   NOTES / IDEAS
 ================================================================================
 
->
+[ ] Origin export: let users choose between several templates (2026-10-20)
+    > Today the template is picked automatically by number of channels
+    > (origin_export.py: _raw_to_origin / _segment_to_origin / export_spectra).
+    > Idea: a user template folder (e.g. Documents\THE_Solution\origin_templates,
+    > or one set in the preferences) scanned next to the built-in ones; templates
+    > named by type + channel count, e.g. HalfLife_Segment_2ch_<style>.otpu. If more
+    > than one matches the data, show a drop-down in the export dialog (default =
+    > built-in). Built-in templates stay read-only inside the program.
+    > Check: a user template must define enough plot styles for the data
+    > (fall back to Origin defaults otherwise, as with >4 channels).
+
 >
 >
 

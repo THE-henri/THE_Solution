@@ -238,6 +238,7 @@ class SpectraResult:
     scale:           Optional[float]        = None   # PCA scale factor
     var_explained:   Optional[float]        = None   # PCA
     n_boot_rejected: int                    = 0
+    is_epsilon:      bool                   = False  # True: ε (M⁻¹ cm⁻¹), False: absorbance
     # annotation
     meta_lines:      list[str]              = field(default_factory=list)
     # series data for plots
@@ -661,6 +662,7 @@ def run_spectra_extraction(
         scale           = scale,
         var_explained   = var_explained,
         n_boot_rejected = n_boot_rejected,
+        is_epsilon      = params.concentration_mol_L is not None,
         meta_lines      = meta,
         series_used     = series_used,
         B_estimates          = _diag_B_estimates,

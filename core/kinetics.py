@@ -13,26 +13,37 @@ def exp_negative(t, A0, A_inf, k):
 
 def _compute_linear_k(time, absorbance, switch, A_inf_manual):
     """
-    Compute k by linear regression on ln-transformed data (always available).
+    Compute k (and A0) by linear regression on ln-transformed data (always available).
 
     Positive switch, A_inf = 0:   ln(A) = ln(A0) - k*t
     Positive switch, A_inf ≠ 0:   ln|A - A_inf| = ln|A0 - A_inf| - k*t
     Negative switch:               ln|A - A_inf| = ln|A0 - A_inf| - k*t
 
-    Returns (k_linear, t_half_linear, r2_linear) or (None, None, None) if it fails.
-    R² is computed on the linearised (ln-transformed) data.
+    Time is shifted so t=0 is the first point of `time` (i.e. the start of the
+    analysed window/segment) before fitting, so the recovered A0 is the
+    amplitude AT that window's start rather than an extrapolation back to
+    absolute t=0 — the latter overflows to nonsense magnitudes when the
+    window starts far from t=0 (e.g. a segment beginning at t=2000 s).
+
+    Returns (k_linear, A0_linear, t_half_linear, r2_linear), or
+    (None, None, None, None) if it fails. R² is computed on the linearised
+    (ln-transformed) data.
     """
     try:
-        A_inf = float(A_inf_manual) if A_inf_manual is not None else None
+        A_inf  = float(A_inf_manual) if A_inf_manual is not None else None
+        t_offset = float(time[0])
+        t_shifted = time - t_offset
 
         if switch == "positive" and (A_inf is None or A_inf == 0.0):
             # Pure decay to zero: ln(A) is linear in t
+            A_inf = A_inf if A_inf is not None else 0.0
             valid = absorbance > 0
             if valid.sum() < 2:
-                return None, None, None
+                return None, None, None, None
             y = np.log(absorbance[valid])
-            coeffs = np.polyfit(time[valid], y, 1)
-            k = float(-coeffs[0])
+            coeffs = np.polyfit(t_shifted[valid], y, 1)
+            k  = float(-coeffs[0])
+            A0 = float(np.exp(coeffs[1]))
         else:
             # Negative switch (any A_inf) or positive with non-zero baseline
             if A_inf is None:
@@ -40,29 +51,32 @@ def _compute_linear_k(time, absorbance, switch, A_inf_manual):
             delta = absorbance - A_inf
             valid = np.abs(delta) > 1e-12
             if valid.sum() < 2:
-                return None, None, None
+                return None, None, None, None
             y = np.log(np.abs(delta[valid]))
-            coeffs = np.polyfit(time[valid], y, 1)
-            k = float(-coeffs[0])
+            coeffs = np.polyfit(t_shifted[valid], y, 1)
+            k  = float(-coeffs[0])
+            # Sign recovered from the first valid point, since ln|.| loses it.
+            A0 = float(A_inf + np.sign(delta[valid][0]) * np.exp(coeffs[1]))
 
         if k <= 0:
-            return None, None, None
+            return None, None, None, None
 
-        y_hat  = np.polyval(coeffs, time[valid])
+        y_hat  = np.polyval(coeffs, t_shifted[valid])
         ss_res = float(np.sum((y - y_hat) ** 2))
         ss_tot = float(np.sum((y - np.mean(y)) ** 2))
         r2     = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
-        return k, float(np.log(2) / k), r2
+        return k, A0, float(np.log(2) / k), r2
 
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
 
 def _linear_fallback(time, absorbance, switch, A_inf_manual):
     """
     Fallback when curve_fit fails: use linear regression on ln-transformed data.
 
-    Returns (popt, t_half, fitted_curve, r_squared, k_linear, t_half_linear, r2_linear).
+    Returns (popt, t_half, fitted_curve, r_squared, k_linear, t_half_linear,
+             r2_linear, A0_linear).
     popt is always 3-element (A0, A_inf, k) for both switch types.
     """
     try:
@@ -79,7 +93,7 @@ def _linear_fallback(time, absorbance, switch, A_inf_manual):
                 delta = absorbance - A_inf_val
                 valid = np.abs(delta) > 1e-12
                 if valid.sum() < 2:
-                    return None, None, None, None, None, None, None
+                    return None, None, None, None, None, None, None, None
                 t_v = time[valid] - t_offset
                 y_v = np.log(np.abs(delta[valid]))
                 coeffs = np.polyfit(t_v, y_v, 1)
@@ -94,7 +108,7 @@ def _linear_fallback(time, absorbance, switch, A_inf_manual):
                 A_inf_val = A_inf_val if A_inf_val is not None else 0.0
                 valid = absorbance > 0
                 if valid.sum() < 2:
-                    return None, None, None, None, None, None, None
+                    return None, None, None, None, None, None, None, None
                 t_v = time[valid] - t_offset
                 y_v = np.log(absorbance[valid])
                 coeffs = np.polyfit(t_v, y_v, 1)
@@ -110,7 +124,7 @@ def _linear_fallback(time, absorbance, switch, A_inf_manual):
             delta = absorbance - A_inf
             valid = np.abs(delta) > 1e-12
             if valid.sum() < 2:
-                return None, None, None, None, None, None, None
+                return None, None, None, None, None, None, None, None
             t_v = time[valid] - t_offset
             y_v = np.log(np.abs(delta[valid]))
             coeffs = np.polyfit(t_v, y_v, 1)
@@ -133,11 +147,11 @@ def _linear_fallback(time, absorbance, switch, A_inf_manual):
         ls_res    = float(np.sum((y_v - y_hat) ** 2))
         ls_tot    = float(np.sum((y_v - np.mean(y_v)) ** 2))
         r2_linear = float(1 - ls_res / ls_tot) if ls_tot > 0 else float("nan")
-        return popt, t_half, fitted_curve, r_squared, k, t_half, r2_linear
+        return popt, t_half, fitted_curve, r_squared, k, t_half, r2_linear, A0
 
     except Exception as e:
         print(f"  Linear fallback also failed: {e}")
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
 
 def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
@@ -146,30 +160,42 @@ def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
 
     Returns
     -------
-    (popt, t_half, fitted_curve, r_squared, k_linear, t_half_linear, r2_linear)
+    (popt, t_half, fitted_curve, r_squared, k_linear, t_half_linear,
+     r2_linear, A0_linear)
 
-    popt is always 3-element: (A0, A_inf, k) for both switch types.
+    popt is always 3-element: (A0, A_inf, k) for both switch types. A0 is the
+    amplitude at the start of this window (time[0]), not at absolute t=0 —
+    see the t_offset note below.
       - Positive, A_inf free:  A_inf extracted from data by 3-param fit.
       - Positive, A_inf fixed: A_inf = A_inf_manual (may be 0 for pure decay).
       - Negative, A_inf free:  A_inf extracted from data by 3-param fit.
       - Negative, A_inf fixed: A_inf = A_inf_manual.
 
-    k_linear / t_half_linear / r2_linear — from ln-transform linear regression.
-      None when A_inf is free (unknown until after the exponential fit).
+    k_linear / A0_linear / t_half_linear / r2_linear — from ln-transform
+    linear regression. None when A_inf is free (unknown until after the
+    exponential fit).
     """
     time       = np.array(time)
     absorbance = np.array(absorbance)
 
     if len(time) < 2:
         print("Not enough data points for fitting.")
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
+
+    # Shift time so t=0 is this window's first point. A0 then means "the
+    # amplitude at the start of the analysed window", not an extrapolation
+    # back to the experiment's absolute t=0 — the latter overflows to
+    # nonsense magnitudes (e.g. 1e30) once the window starts far from t=0,
+    # since it requires exp(+k * time[0]).
+    t_offset  = float(time[0])
+    t_shifted = time - t_offset
 
     # k_linear can only be computed when A_inf is already known (fixed).
     if A_inf_manual is not None:
-        k_linear, t_half_linear, r2_linear = _compute_linear_k(
+        k_linear, A0_linear, t_half_linear, r2_linear = _compute_linear_k(
             time, absorbance, switch, A_inf_manual)
     else:
-        k_linear, t_half_linear, r2_linear = None, None, None
+        k_linear, A0_linear, t_half_linear, r2_linear = None, None, None, None
 
     try:
         with warnings.catch_warnings():
@@ -187,22 +213,22 @@ def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
 
                     p0     = [absorbance[0], 1e-3]
                     bounds = ([0, 0], [np.inf, np.inf])
-                    popt_temp, _ = curve_fit(model_fixed_pos, time, absorbance,
+                    popt_temp, _ = curve_fit(model_fixed_pos, t_shifted, absorbance,
                                              p0=p0, bounds=bounds, maxfev=2000)
                     A0, k = popt_temp
                     popt         = (A0, A_inf_fixed, k)
-                    fitted_curve = model_fixed_pos(time, A0, k)
+                    fitted_curve = model_fixed_pos(t_shifted, A0, k)
 
                 else:
                     # Free baseline — extract A_inf from the decay itself
                     p0     = [absorbance[0], absorbance[-1], 1e-3]
                     bounds = ([-np.inf, -np.inf, 0], [np.inf, np.inf, np.inf])
-                    popt, _ = curve_fit(exp_negative, time, absorbance,
+                    popt, _ = curve_fit(exp_negative, t_shifted, absorbance,
                                         p0=p0, bounds=bounds, maxfev=2000)
                     A0, A_inf, k = popt
-                    fitted_curve = exp_negative(time, A0, A_inf, k)
+                    fitted_curve = exp_negative(t_shifted, A0, A_inf, k)
                     # A_inf is now known — compute linear k
-                    k_linear, t_half_linear, r2_linear = _compute_linear_k(
+                    k_linear, A0_linear, t_half_linear, r2_linear = _compute_linear_k(
                         time, absorbance, switch, A_inf)
 
             # ── NEGATIVE SWITCH ──────────────────────────────────────────────
@@ -215,21 +241,21 @@ def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
 
                     p0     = [absorbance[0], 1e-3]
                     bounds = ([-np.inf, 0], [np.inf, np.inf])
-                    popt_temp, _ = curve_fit(model_fixed, time, absorbance,
+                    popt_temp, _ = curve_fit(model_fixed, t_shifted, absorbance,
                                              p0=p0, bounds=bounds, maxfev=2000)
                     A0, k = popt_temp
                     popt         = (A0, A_inf_manual, k)
-                    fitted_curve = model_fixed(time, A0, k)
+                    fitted_curve = model_fixed(t_shifted, A0, k)
 
                 else:
                     p0     = [absorbance[0], absorbance[-1], 1e-3]
                     bounds = ([-np.inf, -np.inf, 0], [np.inf, np.inf, np.inf])
-                    popt, _ = curve_fit(exp_negative, time, absorbance,
+                    popt, _ = curve_fit(exp_negative, t_shifted, absorbance,
                                         p0=p0, bounds=bounds, maxfev=2000)
                     A0, A_inf, k = popt
-                    fitted_curve = exp_negative(time, A0, A_inf, k)
+                    fitted_curve = exp_negative(t_shifted, A0, A_inf, k)
                     # A_inf now known — compute linear k
-                    k_linear, t_half_linear, r2_linear = _compute_linear_k(
+                    k_linear, A0_linear, t_half_linear, r2_linear = _compute_linear_k(
                         time, absorbance, switch, A_inf)
 
             else:
@@ -242,7 +268,8 @@ def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
         ss_tot    = np.sum((absorbance - np.mean(absorbance)) ** 2)
         r_squared = 1 - ss_res / ss_tot
 
-        return popt, t_half, fitted_curve, r_squared, k_linear, t_half_linear, r2_linear
+        return (popt, t_half, fitted_curve, r_squared,
+                k_linear, t_half_linear, r2_linear, A0_linear)
 
     except Exception as e:
         print(f"  curve_fit failed ({e})")
@@ -253,4 +280,4 @@ def fit_half_life(time, absorbance, switch="positive", A_inf_manual=None):
             return _linear_fallback(time, absorbance, switch, A_inf_manual)
         else:
             print("  Cannot fall back: A∞ unknown without a successful exponential fit.")
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None

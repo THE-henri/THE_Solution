@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: >-
+  If you use THE_Solution for results in a publication or thesis, or if you
+  reuse, adapt or build on its code (including AI-generated derivatives),
+  please cite it as below and also cite the original methods listed in the
+  in-app Handbook (GENERAL → Citations & References).
+title: "THE_Solution: Quantum Yield & Photochemistry Analysis"
+type: software
+authors:
+  - given-names: Henri
+    family-names: Tertilt
+    email: henri.tertilt@hu-berlin.de
+    affiliation: Hecht Lab
+version: 1.0.0
+date-released: 2026-10-20
+license: MIT
+repository-code: "https://github.com/THE-henri/THE_Solution"

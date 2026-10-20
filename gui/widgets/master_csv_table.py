@@ -12,16 +12,16 @@ from PyQt6.QtGui import QColor
 
 COLUMNS = [
     "File", "Segment", "Wavelength", "Type", "Temperature_C",
-    "Switch", "A0", "A_inf", "k", "Half_life_s", "R2",
+    "Switch", "A0", "A_inf", "k", "Half_life_s", "R2", "Fit_Method",
 ]
 
 _HEADER_LABELS = [
     "File", "Segment", "Wavelength", "Type", "T (°C)",
-    "Switch", "A₀", "A∞", "k (s⁻¹)", "t½ (s)", "R²",
+    "Switch", "A₀", "A∞", "k (s⁻¹)", "t½ (s)", "R²", "Fit",
 ]
 
 _FLOAT_COLS = {"A0", "A_inf", "k", "Half_life_s", "R2"}
-_FLOAT_FMT  = {"A0": ".4f", "A_inf": ".4f", "k": ".6f",
+_FLOAT_FMT  = {"A0": ".4f", "A_inf": ".4f", "k": ".4e",
                "Half_life_s": ".2f", "R2": ".6f"}
 
 # ── Row colours (shared) ─────────────────────────────────────────────────────

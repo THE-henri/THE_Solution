@@ -1,6 +1,6 @@
 """
 Temporary conversion script — excel_control only.
-Reads AZA-SO2Me_acidic.xlsx, extracts both kinetic traces, and writes
+Reads COMPOUND-NAME_acidic.xlsx, extracts both kinetic traces, and writes
 them as a two-channel kinetic CSV in the format expected by load_kinetic_csv().
 
 Output format (load_kinetic_csv):
@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
-EXCEL_PATH = BASE_DIR / "data" / "quantum_yield" / "excel_control" / "AZA-SO2Me_acidic.xlsx"
-OUT_PATH   = BASE_DIR / "data" / "quantum_yield" / "raw" / "excel_control_AZA-SO2Me_acidic.csv"
+EXCEL_PATH = BASE_DIR / "data" / "quantum_yield" / "excel_control" / "COMPOUND-NAME_acidic.xlsx"
+OUT_PATH   = BASE_DIR / "data" / "quantum_yield" / "raw" / "excel_control_COMPOUND-NAME_acidic.csv"
 
 # ── Load Excel ───────────────────────────────────────────────────────────────
 df   = pd.read_excel(EXCEL_PATH, sheet_name="Tabelle1", header=None)

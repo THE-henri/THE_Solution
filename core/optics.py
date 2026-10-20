@@ -25,6 +25,8 @@ def calculate_extinction_coefficients_integer_wavelengths(
             - 'weight_mg' : mass of compound weighed in mg
             - 'MW_gmol'   : molecular weight in g/mol
             - 'volume_mL' : total dissolution volume in mL
+        or, if mass/volume were not recorded:
+            - 'conc_molL' : concentration in mol/L (used instead of the three above)
     path_length_cm : float
         Cuvette path length in cm.
     solvent : str
@@ -93,6 +95,7 @@ def calculate_extinction_coefficients_integer_wavelengths(
         weight_mg = meas.get("weight_mg")
         MW_gmol   = meas.get("MW_gmol")
         volume_mL = meas.get("volume_mL")
+        conc_molL = meas.get("conc_molL")
 
         instrument_eps = []
 
@@ -114,7 +117,8 @@ def calculate_extinction_coefficients_integer_wavelengths(
 
             # Concentration in mol/L
             try:
-                c_molL = (weight_mg * 1e-3) / MW_gmol / (volume_mL * 1e-3)
+                c_molL = (conc_molL if conc_molL is not None
+                          else (weight_mg * 1e-3) / MW_gmol / (volume_mL * 1e-3))
                 eps = abs_values / (c_molL * path_length_cm)
             except Exception as e:
                 print(f"Error calculating extinction coefficient for {csv_file}: {e}")

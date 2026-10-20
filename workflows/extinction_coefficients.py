@@ -18,7 +18,7 @@ for folder in [RAW_DIR, RESULTS_DIR, PLOTS_DIR]:
 # -------------------------
 # Workflow parameters          (all will become GUI inputs later)
 # -------------------------
-compound_name   = "AZA-SO2Me"    # used in plot title and saved output
+compound_name   = "COMPOUND-NAME"    # used in plot title and saved output
 path_length_cm  = 1.0            # cm
 solvent         = "acetonitrile"
 temperature_value = 25           # °C
@@ -31,7 +31,7 @@ temperature_value = 25           # °C
 #   MW_gmol   : molecular weight in g/mol
 #   volume_mL : total dissolution / dilution volume in mL
 measurement_params = {
-    "1-AZA-SO2Me_EC_25C.csv": {
+    "1-COMPOUND-NAME_EC_25C.csv": {
         "weight_mg": 0.097,
         "MW_gmol":   339.4530,
         "volume_mL": 10.0,
